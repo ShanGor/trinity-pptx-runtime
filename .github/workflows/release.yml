@@ -1,0 +1,164 @@
+name: Release PPTX Runtime
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 1.0.0)'
+        required: true
+        default: '1.0.0'
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+        include:
+          - arch: x64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: ${{ matrix.platform }}
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Determine version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+        else
+          echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Build runtime in container
+      run: |
+        docker run --rm --platform ${{ matrix.platform }} \
+          -v ${{ github.workspace }}:/workspace \
+          -w /workspace \
+          ubuntu:22.04 \
+          bash -c "
+            apt-get update && \
+            apt-get install -y debootstrap curl binutils xz-utils && \
+            cd runtime && \
+            ./build.sh
+          "
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: trinity-pptx-runtime-linux-${{ matrix.arch }}
+        path: trinity-pptx-runtime-linux-${{ matrix.arch }}.tar.gz
+        retention-days: 1
+
+  create-release:
+    needs: build-linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        merge-multiple: true
+    
+    - name: Generate checksums
+      run: |
+        cd artifacts
+        sha256sum *.tar.gz > checksums.txt
+        cat checksums.txt
+    
+    - name: Determine version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          echo "TAG=v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+        else
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.version.outputs.TAG }}
+        name: Trinity PPTX Runtime ${{ steps.version.outputs.VERSION }}
+        body: |
+          ## Trinity PPTX Runtime ${{ steps.version.outputs.VERSION }}
+          
+          A sandboxed runtime for processing PPTX files, bundled with:
+          - LibreOffice (soffice)
+          - Python 3 + markitdown
+          - Node.js + pptxgenjs
+          - Poppler (pdftoppm)
+          
+          ### Downloads
+          
+          | Platform | Architecture | Package |
+          |----------|-------------|---------|
+          | Linux | x64 | [trinity-pptx-runtime-linux-x64.tar.gz](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.TAG }}/trinity-pptx-runtime-linux-x64.tar.gz) |
+          | Linux | arm64 | [trinity-pptx-runtime-linux-arm64.tar.gz](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.TAG }}/trinity-pptx-runtime-linux-arm64.tar.gz) |
+          
+          ### Quick Start
+          
+          ```bash
+          # Download and extract
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.TAG }}/trinity-pptx-runtime-linux-x64.tar.gz
+          tar xzf trinity-pptx-runtime-linux-x64.tar.gz -C ~/.local/share/trinity-pptx-runtime
+          
+          # Add to PATH
+          export PATH=\"\$HOME/.local/share/trinity-pptx-runtime:\$PATH\"
+          
+          # Use it
+          trinity-pptx convert presentation.pptx output.pdf
+          trinity-pptx extract presentation.pptx
+          ```
+          
+          ### Checksums
+          ```
+          $(cat artifacts/checksums.txt)
+          ```
+        files: |
+          artifacts/*.tar.gz
+          artifacts/checksums.txt
+        draft: false
+        prerelease: ${{ contains(steps.version.outputs.VERSION, 'alpha') || contains(steps.version.outputs.VERSION, 'beta') || contains(steps.version.outputs.VERSION, 'rc') }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-latest:
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Update latest tag
+      run: |
+        git tag -f latest
+        git push origin latest --force

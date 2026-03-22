@@ -1,0 +1,371 @@
+#!/bin/bash
+#
+# Trinity PPTX Runtime - Main Entry Point
+# Wraps LibreOffice, Python tools, and Node.js in a sandboxed environment
+#
+
+set -euo pipefail
+
+# Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNTIME_DIR="${SCRIPT_DIR}"
+VERSION_FILE="${RUNTIME_DIR}/VERSION"
+
+# Default settings
+USE_BWRAP=true
+BWRAP_OPTS=""
+WORK_DIR=""
+VERBOSE=false
+
+# Show version
+show_version() {
+    if [ -f "$VERSION_FILE" ]; then
+        head -n1 "$VERSION_FILE"
+    else
+        echo "unknown"
+    fi
+}
+
+# Show help
+show_help() {
+    cat << 'EOF'
+Trinity PPTX Runtime - Process PPTX files in a sandboxed environment
+
+Usage: trinity-pptx [OPTIONS] COMMAND [ARGS...]
+
+Commands:
+  convert <input.pptx> [output.pdf]    Convert PPTX to PDF
+  extract <input.pptx>                 Extract text content from PPTX
+  thumbnail <input.pptx> [output.jpg]  Generate thumbnail preview
+  create <script.js> [output.pptx]     Create PPTX from JavaScript (pptxgenjs)
+  exec <command> [args...]             Execute arbitrary command in sandbox
+
+Options:
+  -h, --help           Show this help message
+  -v, --version        Show version information
+  --no-sandbox         Disable bubblewrap sandbox (not recommended)
+  --work-dir <dir>     Set working directory for input/output files
+  --verbose            Enable verbose output
+
+Examples:
+  trinity-pptx convert presentation.pptx output.pdf
+  trinity-pptx extract slides.pptx
+  trinity-pptx create my-presentation.js deck.pptx
+  trinity-pptx exec python3 -m markitdown presentation.pptx
+
+Environment Variables:
+  TRINITY_PPTX_RUNTIME    Path to runtime directory (overrides auto-detect)
+  TRINITY_NO_SANDBOX      Set to "1" to disable sandbox
+  TRINITY_BWRAP_OPTS      Additional bubblewrap options
+
+EOF
+}
+
+# Log verbose messages
+log() {
+    if [ "$VERBOSE" = true ]; then
+        echo "[trinity-pptx] $*" >&2
+    fi
+}
+
+# Detect if running in sandboxed environment
+needs_shim() {
+    # Check if AF_UNIX sockets are blocked
+    python3 -c "import socket; s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.close()" 2>/dev/null || return 0
+    return 1
+}
+
+# Setup environment variables for LibreOffice
+setup_env() {
+    local env_vars=""
+    
+    # LibreOffice needs this for headless mode
+    env_vars="${env_vars} --setenv SAL_USE_VCLPLUGIN svp"
+    
+    # Set HOME to a writable tmpfs location
+    env_vars="${env_vars} --setenv HOME /tmp/home"
+    
+    # Add runtime library path
+    env_vars="${env_vars} --setenv LD_LIBRARY_PATH /lib:/lib64"
+    
+    echo "$env_vars"
+}
+
+# Build bubblewrap command
+build_bwrap_cmd() {
+    local cmd=""
+    
+    # Basic sandbox setup
+    cmd="${cmd} --unshare-all"
+    cmd="${cmd} --share-net"
+    cmd="${cmd} --die-with-parent"
+    
+    # Mount runtime as read-only
+    cmd="${cmd} --ro-bind ${RUNTIME_DIR} /runtime"
+    
+    # Proc and dev filesystems
+    cmd="${cmd} --proc /proc"
+    cmd="${cmd} --dev /dev"
+    
+    # Temporary directories
+    cmd="${cmd} --tmpfs /tmp"
+    cmd="${cmd} --tmpfs /tmp/home"
+    
+    # Working directory (if specified)
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
+        cmd="${cmd} --bind ${WORK_DIR} /work"
+        cmd="${cmd} --setenv WORKDIR /work"
+    fi
+    
+    # Environment variables
+    cmd="${cmd} $(setup_env)"
+    
+    # Additional user-specified options
+    if [ -n "${TRINITY_BWRAP_OPTS:-}" ]; then
+        cmd="${cmd} ${TRINITY_BWRAP_OPTS}"
+    fi
+    
+    echo "$cmd"
+}
+
+# Execute command in sandbox
+exec_sandboxed() {
+    local cmd="$1"
+    shift
+    
+    if [ "$USE_BWRAP" = true ] && command -v bwrap &> /dev/null; then
+        log "Using bubblewrap sandbox"
+        local bwrap_args
+        bwrap_args=$(build_bwrap_cmd)
+        
+        # Change to work directory if specified
+        if [ -n "$WORK_DIR" ]; then
+            exec bwrap $bwrap_args --chdir /work /runtime/bin/$cmd "$@"
+        else
+            exec bwrap $bwrap_args /runtime/bin/$cmd "$@"
+        fi
+    else
+        log "Running without sandbox"
+        if [ -n "$WORK_DIR" ]; then
+            (cd "$WORK_DIR" && exec "$RUNTIME_DIR/bin/$cmd" "$@")
+        else
+            exec "$RUNTIME_DIR/bin/$cmd" "$@"
+        fi
+    fi
+}
+
+# Convert PPTX to PDF
+convert_pptx() {
+    local input="$1"
+    local output="${2:-${input%.pptx}.pdf}"
+    
+    log "Converting: $input -> $output"
+    
+    if [ ! -f "$input" ]; then
+        echo "Error: Input file not found: $input" >&2
+        exit 1
+    fi
+    
+    # Set work directory to input file's directory
+    WORK_DIR="$(cd "$(dirname "$input")" && pwd)"
+    local input_name
+    input_name=$(basename "$input")
+    local output_name
+    output_name=$(basename "$output")
+    
+    exec_sandboxed soffice --headless --convert-to pdf --outdir /work "/work/$input_name"
+    
+    # Rename if output name differs
+    if [ "$input_name" != "${output_name%.pdf}.pptx" ]; then
+        mv "$WORK_DIR/${input_name%.pptx}.pdf" "$WORK_DIR/$output_name"
+    fi
+}
+
+# Extract text from PPTX
+extract_text() {
+    local input="$1"
+    
+    log "Extracting text from: $input"
+    
+    if [ ! -f "$input" ]; then
+        echo "Error: Input file not found: $input" >&2
+        exit 1
+    fi
+    
+    WORK_DIR="$(cd "$(dirname "$input")" && pwd)"
+    local input_name
+    input_name=$(basename "$input")
+    
+    exec_sandboxed python3 -m markitdown "/work/$input_name"
+}
+
+# Generate thumbnail
+generate_thumbnail() {
+    local input="$1"
+    local output="${2:-${input%.pptx}.jpg}"
+    
+    log "Generating thumbnail: $input -> $output"
+    
+    if [ ! -f "$input" ]; then
+        echo "Error: Input file not found: $input" >&2
+        exit 1
+    fi
+    
+    WORK_DIR="$(cd "$(dirname "$input")" && pwd)"
+    local input_name
+    input_name=$(basename "$input")
+    local output_name
+    output_name=$(basename "$output")
+    
+    # Convert to PDF first, then to image
+    exec_sandboxed soffice --headless --convert-to pdf --outdir /tmp "/work/$input_name"
+    exec_sandboxed pdftoppm -jpeg -r 150 -f 1 -l 1 "/tmp/${input_name%.pptx}.pdf" "/work/${output_name%.jpg}"
+}
+
+# Create PPTX from JavaScript
+create_pptx() {
+    local script="$1"
+    local output="${2:-output.pptx}"
+    
+    log "Creating PPTX from: $script -> $output"
+    
+    if [ ! -f "$script" ]; then
+        echo "Error: Script file not found: $script" >&2
+        exit 1
+    fi
+    
+    WORK_DIR="$(cd "$(dirname "$script")" && pwd)"
+    local script_name
+    script_name=$(basename "$script")
+    
+    # Create a wrapper script that loads pptxgenjs and executes user script
+    cat > "$WORK_DIR/.trinity-pptx-wrapper.js" << 'WRAPPER'
+const PptxGenJS = require('pptxgenjs');
+const fs = require('fs');
+const path = require('path');
+
+// Get the user script path from command line
+const userScriptPath = process.argv[2];
+const outputPath = process.argv[3] || 'output.pptx';
+
+if (!userScriptPath) {
+    console.error('Usage: node wrapper.js <user-script.js> [output.pptx]');
+    process.exit(1);
+}
+
+// Load and execute user script
+require(path.resolve(userScriptPath));
+WRAPPER
+
+    exec_sandboxed node "/work/.trinity-pptx-wrapper.js" "/work/$script_name" "/work/$output"
+    
+    # Cleanup
+    rm -f "$WORK_DIR/.trinity-pptx-wrapper.js"
+}
+
+# Main execution
+main() {
+    # Check environment overrides
+    if [ -n "${TRINITY_PPTX_RUNTIME:-}" ]; then
+        RUNTIME_DIR="$TRINITY_PPTX_RUNTIME"
+    fi
+    
+    if [ "${TRINITY_NO_SANDBOX:-}" = "1" ]; then
+        USE_BWRAP=false
+    fi
+    
+    # Parse global options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -v|--version)
+                show_version
+                exit 0
+                ;;
+            --no-sandbox)
+                USE_BWRAP=false
+                shift
+                ;;
+            --work-dir)
+                WORK_DIR="$2"
+                shift 2
+                ;;
+            --verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -*)
+                echo "Unknown option: $1" >&2
+                show_help
+                exit 1
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    
+    # Check runtime directory
+    if [ ! -d "$RUNTIME_DIR/bin" ]; then
+        echo "Error: Runtime directory not found or invalid: $RUNTIME_DIR" >&2
+        echo "Set TRINITY_PPTX_RUNTIME to the correct path." >&2
+        exit 1
+    fi
+    
+    # Execute command
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+    
+    local command="$1"
+    shift
+    
+    case "$command" in
+        convert)
+            if [ $# -lt 1 ]; then
+                echo "Usage: trinity-pptx convert <input.pptx> [output.pdf]" >&2
+                exit 1
+            fi
+            convert_pptx "$@"
+            ;;
+        extract)
+            if [ $# -lt 1 ]; then
+                echo "Usage: trinity-pptx extract <input.pptx>" >&2
+                exit 1
+            fi
+            extract_text "$@"
+            ;;
+        thumbnail)
+            if [ $# -lt 1 ]; then
+                echo "Usage: trinity-pptx thumbnail <input.pptx> [output.jpg]" >&2
+                exit 1
+            fi
+            generate_thumbnail "$@"
+            ;;
+        create)
+            if [ $# -lt 1 ]; then
+                echo "Usage: trinity-pptx create <script.js> [output.pptx]" >&2
+                exit 1
+            fi
+            create_pptx "$@"
+            ;;
+        exec)
+            if [ $# -lt 1 ]; then
+                echo "Usage: trinity-pptx exec <command> [args...]" >&2
+                exit 1
+            fi
+            exec_sandboxed "$@"
+            ;;
+        *)
+            echo "Unknown command: $command" >&2
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
