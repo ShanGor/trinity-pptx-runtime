@@ -19,10 +19,10 @@ All tools run inside a [bubblewrap](https://github.com/containers/bubblewrap) sa
 
 ```bash
 # Download and run the installer
-curl -fsSL https://raw.githubusercontent.com/your-org/trinity-pptx-runtime/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ShanGor/trinity-pptx-runtime/main/install.sh | bash
 
 # Or download manually
-curl -LO https://github.com/your-org/trinity-pptx-runtime/releases/latest/download/trinity-pptx-runtime-linux-x64.tar.gz
+curl -LO https://github.com/ShanGor/trinity-pptx-runtime/releases/latest/download/trinity-pptx-runtime-linux-x64.tar.gz
 tar xzf trinity-pptx-runtime-linux-x64.tar.gz -C ~/.local/share/trinity-pptx-runtime
 export PATH="$HOME/.local/share/trinity-pptx-runtime:$PATH"
 ```
@@ -127,7 +127,7 @@ trinity-pptx exec soffice --headless --convert-to pdf input.docx
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/trinity-pptx-runtime.git
+git clone https://github.com/ShanGor/trinity-pptx-runtime.git
 cd trinity-pptx-runtime
 
 # Build the runtime
@@ -203,5 +203,5 @@ Contributions are welcome! Please open an issue or pull request on GitHub.
 
 ## Support
 
-- GitHub Issues: https://github.com/your-org/trinity-pptx-runtime/issues
+- GitHub Issues: https://github.com/ShanGor/trinity-pptx-runtime/issues
 - Trinity Documentation: https://github.com/your-org/trinity/docs

@@ -8,7 +8,7 @@ set -euo pipefail
 
 # Configuration
 REPO="trinity-pptx-runtime"
-GITHUB_REPO="your-org/${REPO}"  # Update this with actual org/user
+GITHUB_REPO="ShanGor/${REPO}"
 INSTALL_DIR="${HOME}/.local/share/trinity-pptx-runtime"
 BIN_DIR="${HOME}/.local/bin"
 VERSION="${VERSION:-latest}"
