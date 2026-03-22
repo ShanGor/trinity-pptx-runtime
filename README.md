@@ -24,7 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/ShanGor/trinity-pptx-runtime/main/i
 # Or download manually
 curl -LO https://github.com/ShanGor/trinity-pptx-runtime/releases/latest/download/trinity-pptx-runtime-linux-x64.tar.gz
 tar xzf trinity-pptx-runtime-linux-x64.tar.gz -C ~/.local/share/trinity-pptx-runtime
-export PATH="$HOME/.local/share/trinity-pptx-runtime:$PATH"
+ln -sf "$HOME/.local/share/trinity-pptx-runtime/trinity-pptx" "$HOME/.local/bin/trinity-pptx"
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ### Usage
@@ -149,10 +150,11 @@ sudo ./build.sh
 **What the build script does:**
 1. Creates a minimal Ubuntu rootfs using `debootstrap`
 2. Installs required packages (LibreOffice, Python, Node.js, Poppler, fonts)
-3. Installs Python packages (markitdown[pptx], Pillow)
+3. Installs Python packages (markitdown[pptx], Pillow) into the bundled runtime
 4. Installs Node.js packages (pptxgenjs)
-5. Optimizes by removing unnecessary files (docs, man pages, caches)
-6. Packages everything into a tarball
+5. Packages both `/usr` and `/usr/local` runtime assets needed by the tools
+6. Verifies the packaged artifact can import `markitdown` and `pptxgenjs`
+7. Optimizes by removing unnecessary files (docs, man pages, caches)
 
 #### Option 2: GitHub Actions (Recommended)
 

@@ -8,6 +8,42 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DIST_DIR="$PROJECT_ROOT/dist"
 BUILD_DIR="$PROJECT_ROOT/build"
+ROOTFS="$BUILD_DIR/rootfs"
+
+copy_tree_contents() {
+    local src="$1"
+    local dst="$2"
+
+    if [ -d "$src" ]; then
+        mkdir -p "$dst"
+        cp -a "$src"/. "$dst"/
+    fi
+}
+
+verify_runtime_bundle() {
+    echo "Verifying bundled runtime..."
+
+    if [ ! -x "$DIST_DIR/bin/python3" ]; then
+        echo "Missing bundled python3 binary"
+        exit 1
+    fi
+
+    if [ ! -x "$DIST_DIR/bin/node" ]; then
+        echo "Missing bundled node binary"
+        exit 1
+    fi
+
+    if [ ! -x "$DIST_DIR/bin/soffice" ]; then
+        echo "Missing bundled soffice binary"
+        exit 1
+    fi
+
+    TRINITY_NO_SANDBOX=1 "$DIST_DIR/trinity-pptx" exec \
+        python3 -c "import markitdown, PIL; print(markitdown.__file__)" >/dev/null
+
+    TRINITY_NO_SANDBOX=1 "$DIST_DIR/trinity-pptx" exec \
+        node -e "require('pptxgenjs')"
+}
 
 echo "=== Trinity PPTX Runtime Builder ==="
 echo "Build directory: $BUILD_DIR"
@@ -42,7 +78,6 @@ echo "Using repository: $UBUNTU_REPO"
 
 # Create minimal Ubuntu rootfs
 echo "Creating minimal rootfs..."
-ROOTFS="$BUILD_DIR/rootfs"
 mkdir -p "$ROOTFS"
 
 # Use debootstrap if available, otherwise download minimal rootfs
@@ -96,9 +131,16 @@ chroot "$ROOTFS" apt-get install -y --no-install-recommends \
 chroot "$ROOTFS" apt-get clean
 chroot "$ROOTFS" rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
+# Install Python packages into the bundled runtime path.
+# Using --target ensures the package lands inside the runtime bundle. We also
+# keep packaging logic tolerant of dependencies that still install into
+# /usr/local on future distro or toolchain changes.
 echo "Installing Python packages..."
-chroot "$ROOTFS" pip3 install --no-cache-dir markitdown[pptx] Pillow
+chroot "$ROOTFS" mkdir -p /usr/lib/python3/dist-packages
+chroot "$ROOTFS" pip3 install --no-cache-dir \
+    --target /usr/lib/python3/dist-packages \
+    markitdown[pptx] \
+    Pillow
 
 # Install Node.js packages globally
 echo "Installing Node.js packages..."
@@ -120,21 +162,23 @@ echo "Creating distribution package..."
 mkdir -p "$DIST_DIR/bin" "$DIST_DIR/lib" "$DIST_DIR/share"
 
 # Copy binaries
-cp -r "$ROOTFS/usr/bin"/* "$DIST_DIR/bin/" 2>/dev/null || true
-cp -r "$ROOTFS/usr/lib"/* "$DIST_DIR/lib/" 2>/dev/null || true
-cp -r "$ROOTFS/usr/lib64"/* "$DIST_DIR/lib/" 2>/dev/null || true
+copy_tree_contents "$ROOTFS/usr/bin" "$DIST_DIR/bin"
+copy_tree_contents "$ROOTFS/usr/local/bin" "$DIST_DIR/bin"
+copy_tree_contents "$ROOTFS/usr/lib" "$DIST_DIR/lib"
+copy_tree_contents "$ROOTFS/usr/local/lib" "$DIST_DIR/lib"
+copy_tree_contents "$ROOTFS/usr/lib64" "$DIST_DIR/lib"
 
 # Copy share directories (LibreOffice needs these)
-cp -r "$ROOTFS/usr/share/libreoffice" "$DIST_DIR/share/" 2>/dev/null || true
-cp -r "$ROOTFS/usr/share/fonts" "$DIST_DIR/share/" 2>/dev/null || true
-cp -r "$ROOTFS/usr/share/java" "$DIST_DIR/share/" 2>/dev/null || true
-cp -r "$ROOTFS/usr/share/perl" "$DIST_DIR/share/" 2>/dev/null || true
-cp -r "$ROOTFS/usr/share/pixmaps" "$DIST_DIR/share/" 2>/dev/null || true
-cp -r "$ROOTFS/usr/share/xml" "$DIST_DIR/share/" 2>/dev/null || true
+copy_tree_contents "$ROOTFS/usr/share/libreoffice" "$DIST_DIR/share/libreoffice"
+copy_tree_contents "$ROOTFS/usr/share/fonts" "$DIST_DIR/share/fonts"
+copy_tree_contents "$ROOTFS/usr/share/java" "$DIST_DIR/share/java"
+copy_tree_contents "$ROOTFS/usr/share/perl" "$DIST_DIR/share/perl"
+copy_tree_contents "$ROOTFS/usr/share/pixmaps" "$DIST_DIR/share/pixmaps"
+copy_tree_contents "$ROOTFS/usr/share/xml" "$DIST_DIR/share/xml"
 
 # Copy etc for LibreOffice configuration
 mkdir -p "$DIST_DIR/etc"
-cp -r "$ROOTFS/etc/libreoffice" "$DIST_DIR/etc/" 2>/dev/null || true
+copy_tree_contents "$ROOTFS/etc/libreoffice" "$DIST_DIR/etc/libreoffice"
 
 # Copy wrapper script
 cp "$PROJECT_ROOT/wrapper/trinity-pptx" "$DIST_DIR/"
@@ -143,6 +187,8 @@ chmod +x "$DIST_DIR/trinity-pptx"
 # Create version file
 echo "1.0.0" > "$DIST_DIR/VERSION"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$DIST_DIR/VERSION"
+
+verify_runtime_bundle
 
 # Create tarball
 echo "Creating tarball..."

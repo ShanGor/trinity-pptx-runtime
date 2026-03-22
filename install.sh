@@ -207,6 +207,13 @@ verify_installation() {
     else
         log_warning "Could not verify version, but files are in place"
     fi
+
+    if "${INSTALL_DIR}/trinity-pptx" exec python3 -c "import markitdown, PIL" &> /dev/null; then
+        log_success "Python extract dependencies verified"
+    else
+        log_error "Runtime verification failed: bundled Python dependencies are missing"
+        exit 1
+    fi
 }
 
 # Print usage instructions

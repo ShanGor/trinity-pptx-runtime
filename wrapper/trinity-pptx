@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # Configuration
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 RUNTIME_DIR="${SCRIPT_DIR}"
 VERSION_FILE="${RUNTIME_DIR}/VERSION"
 
@@ -78,9 +78,24 @@ needs_shim() {
     return 1
 }
 
+discover_pythonpath() {
+    local path
+    local python_path=""
+
+    while IFS= read -r path; do
+        if [ -n "$python_path" ]; then
+            python_path="${python_path}:"
+        fi
+        python_path="${python_path}/runtime${path#$RUNTIME_DIR}"
+    done < <(find "$RUNTIME_DIR/lib" -mindepth 2 -maxdepth 2 -type d \( -name dist-packages -o -name site-packages \) | sort)
+
+    echo "$python_path"
+}
+
 # Setup environment variables for LibreOffice
 setup_env() {
     local env_vars=""
+    local python_path=""
     
     # LibreOffice needs this for headless mode
     env_vars="${env_vars} --setenv SAL_USE_VCLPLUGIN svp"
@@ -90,6 +105,13 @@ setup_env() {
     
     # Add runtime bin to PATH for node, python, etc.
     env_vars="${env_vars} --setenv PATH /runtime/bin:/usr/bin:/bin"
+
+    # Ensure bundled Python packages are importable across both /usr and
+    # /usr/local-derived layouts.
+    python_path="$(discover_pythonpath)"
+    if [ -n "$python_path" ]; then
+        env_vars="${env_vars} --setenv PYTHONPATH ${python_path}"
+    fi
     
     # Add runtime library path
     env_vars="${env_vars} --setenv LD_LIBRARY_PATH /runtime/lib:/lib:/lib64"
