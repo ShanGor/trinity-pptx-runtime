@@ -273,8 +273,33 @@ if (!userScriptPath) {
     process.exit(1);
 }
 
+// Create a global pptxgen instance that user scripts can access
+const pptxgen = new PptxGenJS();
+pptxgen.layout = 'LAYOUT_16x9';
+
+// Export globally for user scripts
+// User can use either:
+//   - pptxgen (the presentation instance)
+//   - pptx (alias for pptxgen)
+//   - PptxGenJS (the class, for creating new instances)
+global.pptxgen = pptxgen;
+global.pptx = pptxgen;
+global.PptxGenJS = PptxGenJS;
+
+// Also expose shapes and charts directly for convenience
+global.shapes = pptxgen.shapes;
+global.charts = pptxgen.charts;
+
 // Load and execute user script
 require(path.resolve(userScriptPath));
+
+// Save the presentation
+pptxgen.writeFile({ fileName: outputPath })
+    .then(() => console.log(`Created: ${outputPath}`))
+    .catch(err => {
+        console.error(`Error creating presentation: ${err.message}`);
+        process.exit(1);
+    });
 WRAPPER
 
     exec_sandboxed node "/work/.trinity-pptx-wrapper.js" "/work/$script_name" "/work/$output"
