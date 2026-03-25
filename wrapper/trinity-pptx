@@ -108,28 +108,50 @@ discover_node_path() {
     echo "$node_path"
 }
 
+append_path_entry() {
+    local current="$1"
+    local entry="$2"
+
+    if [ -z "$entry" ] || [ ! -d "$entry" ]; then
+        echo "$current"
+        return
+    fi
+
+    if [ -z "$current" ]; then
+        echo "$entry"
+        return
+    fi
+
+    case ":$current:" in
+        *":$entry:"*)
+            echo "$current"
+            ;;
+        *)
+            echo "${current}:$entry"
+            ;;
+    esac
+}
+
 discover_library_path() {
     local prefix="${1:-/runtime}"
-    local path
     local library_path=""
+    local dir
 
     if [ ! -d "$RUNTIME_DIR/lib" ]; then
         echo ""
         return
     fi
 
-    while IFS= read -r path; do
-        if [ -n "$library_path" ]; then
-            library_path="${library_path}:"
-        fi
-        library_path="${library_path}${prefix}${path#$RUNTIME_DIR}"
-    done < <(
-        {
-            echo "$RUNTIME_DIR/lib"
-            find "$RUNTIME_DIR/lib" -mindepth 1 -maxdepth 4 -type f \
-                \( -name '*.so' -o -name '*.so.*' \) -printf '%h\n' 2>/dev/null
-        } | sort -u
-    )
+    # Keep the loader path constrained to runtime system-library roots.
+    # Scanning every .so-containing directory (for example Python package
+    # trees) is too broad and can destabilize non-sandboxed Python startup.
+    library_path="$(append_path_entry "$library_path" "${prefix}/lib")"
+
+    while IFS= read -r dir; do
+        library_path="$(append_path_entry "$library_path" "${prefix}${dir#$RUNTIME_DIR}")"
+    done < <(find "$RUNTIME_DIR/lib" -mindepth 1 -maxdepth 1 -type d -name '*-linux-gnu' | sort)
+
+    library_path="$(append_path_entry "$library_path" "${prefix}/lib/libreoffice/program")"
 
     echo "$library_path"
 }
