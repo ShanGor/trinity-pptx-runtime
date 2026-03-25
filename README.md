@@ -28,6 +28,8 @@ ln -sf "$HOME/.local/share/trinity-pptx-runtime/trinity-pptx" "$HOME/.local/bin/
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+When you run `install.sh` from a local source checkout, it now prefers a local build/install path over downloading the latest GitHub release. That is useful when the checkout contains unreleased wrapper or packaging fixes. Use `--release` to force GitHub release installation anyway.
+
 ### Usage
 
 ```bash

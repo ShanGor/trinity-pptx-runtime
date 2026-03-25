@@ -1,17 +1,19 @@
 #!/bin/bash
 #
 # Trinity PPTX Runtime - Installation Script
-# Downloads and installs the latest release
+# Installs from a local checkout when available, otherwise downloads a release
 #
 
 set -euo pipefail
 
 # Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="trinity-pptx-runtime"
 GITHUB_REPO="ShanGor/${REPO}"
 INSTALL_DIR="${HOME}/.local/share/trinity-pptx-runtime"
 BIN_DIR="${HOME}/.local/bin"
 VERSION="${VERSION:-latest}"
+SOURCE_MODE="auto"
 
 # Colors for output
 RED='\033[0;31m'
@@ -108,19 +110,124 @@ get_download_url() {
     fi
 }
 
-# Download and install
-download_and_install() {
-    local arch=$(detect_arch)
-    local os=$(detect_os)
-    local download_url=$(get_download_url "$VERSION" "$arch" "$os")
-    local temp_dir=$(mktemp -d)
-    local tarball="${temp_dir}/trinity-pptx-runtime.tar.gz"
-    
+repo_has_local_source() {
+    [ -f "${SCRIPT_DIR}/runtime/build.sh" ] && [ -f "${SCRIPT_DIR}/wrapper/trinity-pptx" ]
+}
+
+prepare_install_dir() {
+    log_info "Creating installation directory: ${INSTALL_DIR}"
+    rm -rf "${INSTALL_DIR}"
+    mkdir -p "${INSTALL_DIR}"
+}
+
+create_bin_symlink() {
+    log_info "Creating symlink in ${BIN_DIR}..."
+    mkdir -p "$BIN_DIR"
+    ln -sfn "${INSTALL_DIR}/trinity-pptx" "${BIN_DIR}/trinity-pptx"
+}
+
+extract_tarball_into_install_dir() {
+    local tarball="$1"
+
+    prepare_install_dir
+    log_info "Extracting..."
+    tar xzf "$tarball" -C "$INSTALL_DIR"
+    log_success "Extraction complete"
+}
+
+copy_dist_into_install_dir() {
+    local dist_dir="$1"
+
+    prepare_install_dir
+    log_info "Copying local runtime bundle..."
+    cp -a "${dist_dir}/." "${INSTALL_DIR}/"
+    log_success "Local runtime copy complete"
+}
+
+find_local_tarball() {
+    local arch="$1"
+    local os="$2"
+    local tarball="${SCRIPT_DIR}/trinity-pptx-runtime-${os}-${arch}.tar.gz"
+    if [ -f "$tarball" ]; then
+        echo "$tarball"
+    fi
+}
+
+ensure_local_build_artifact() {
+    local arch="$1"
+    local os="$2"
+    local tarball
+    tarball="$(find_local_tarball "$arch" "$os")"
+    if [ -n "$tarball" ]; then
+        echo "$tarball"
+        return
+    fi
+
+    if [ -x "${SCRIPT_DIR}/dist/trinity-pptx" ]; then
+        echo "${SCRIPT_DIR}/dist"
+        return
+    fi
+
+    if ! repo_has_local_source; then
+        return
+    fi
+
+    log_info "No local runtime artifact found. Building from local source..." >&2
+    (
+        cd "${SCRIPT_DIR}/runtime"
+        ./build.sh
+    )
+
+    tarball="$(find_local_tarball "$arch" "$os")"
+    if [ -n "$tarball" ]; then
+        echo "$tarball"
+        return
+    fi
+
+    if [ -x "${SCRIPT_DIR}/dist/trinity-pptx" ]; then
+        echo "${SCRIPT_DIR}/dist"
+    fi
+}
+
+install_from_local_source() {
+    local arch="$1"
+    local os="$2"
+    local artifact
+
+    artifact="$(ensure_local_build_artifact "$arch" "$os")"
+    if [ -z "$artifact" ]; then
+        log_error "No local runtime artifact is available."
+        log_info "Run: (cd runtime && ./build.sh)"
+        exit 1
+    fi
+
+    log_info "Detected platform: ${os}-${arch}"
+    if [ -d "$artifact" ]; then
+        log_info "Installing from local dist directory: ${artifact}"
+        copy_dist_into_install_dir "$artifact"
+    else
+        log_info "Installing from local tarball: ${artifact}"
+        extract_tarball_into_install_dir "$artifact"
+    fi
+    create_bin_symlink
+    log_success "Installation complete!"
+}
+
+install_from_release() {
+    local arch="$1"
+    local os="$2"
+    local download_url
+    local temp_dir
+    local tarball
+
+    download_url=$(get_download_url "$VERSION" "$arch" "$os")
+    temp_dir=$(mktemp -d)
+    tarball="${temp_dir}/trinity-pptx-runtime.tar.gz"
+
     log_info "Detected platform: ${os}-${arch}"
     log_info "Version: ${VERSION}"
     log_info "Download URL: ${download_url}"
-    
-    # Download
+
     log_info "Downloading..."
     if ! curl -fsSL -o "$tarball" "$download_url"; then
         log_error "Failed to download from ${download_url}"
@@ -128,38 +235,47 @@ download_and_install() {
         rm -rf "$temp_dir"
         exit 1
     fi
-    
-    # Verify download
+
     if [ ! -f "$tarball" ] || [ ! -s "$tarball" ]; then
         log_error "Downloaded file is empty or missing"
         rm -rf "$temp_dir"
         exit 1
     fi
-    
+
     log_success "Download complete"
-    
-    # Create install directory
-    log_info "Creating installation directory: ${INSTALL_DIR}"
-    mkdir -p "$INSTALL_DIR"
-    
-    # Extract
-    log_info "Extracting..."
-    tar xzf "$tarball" -C "$INSTALL_DIR"
+    extract_tarball_into_install_dir "$tarball"
     rm -rf "$temp_dir"
-    
-    log_success "Extraction complete"
-    
-    # Create symlink in bin directory
-    log_info "Creating symlink in ${BIN_DIR}..."
-    mkdir -p "$BIN_DIR"
-    
-    if [ -L "${BIN_DIR}/trinity-pptx" ]; then
-        rm "${BIN_DIR}/trinity-pptx"
-    fi
-    
-    ln -s "${INSTALL_DIR}/trinity-pptx" "${BIN_DIR}/trinity-pptx"
-    
+    create_bin_symlink
     log_success "Installation complete!"
+}
+
+install_runtime() {
+    local arch
+    local os
+
+    arch=$(detect_arch)
+    os=$(detect_os)
+
+    case "$SOURCE_MODE" in
+        local)
+            install_from_local_source "$arch" "$os"
+            ;;
+        release)
+            install_from_release "$arch" "$os"
+            ;;
+        auto)
+            if repo_has_local_source; then
+                log_info "Local source checkout detected. Preferring local build/install over GitHub release."
+                install_from_local_source "$arch" "$os"
+            else
+                install_from_release "$arch" "$os"
+            fi
+            ;;
+        *)
+            log_error "Unknown source mode: ${SOURCE_MODE}"
+            exit 1
+            ;;
+    esac
 }
 
 # Update shell configuration
@@ -270,6 +386,14 @@ main() {
                 BIN_DIR="$2"
                 shift 2
                 ;;
+            --local)
+                SOURCE_MODE="local"
+                shift
+                ;;
+            --release)
+                SOURCE_MODE="release"
+                shift
+                ;;
             --help)
                 echo "Usage: $0 [OPTIONS]"
                 echo ""
@@ -277,6 +401,8 @@ main() {
                 echo "  --version <ver>      Install specific version (default: latest)"
                 echo "  --install-dir <dir>  Installation directory (default: ~/.local/share/trinity-pptx-runtime)"
                 echo "  --bin-dir <dir>      Binary symlink directory (default: ~/.local/bin)"
+                echo "  --local              Install from local checkout/build artifact"
+                echo "  --release            Install from GitHub release even in a local checkout"
                 echo "  --help               Show this help message"
                 exit 0
                 ;;
@@ -290,8 +416,8 @@ main() {
     # Check dependencies
     check_deps
     
-    # Download and install
-    download_and_install
+    # Install
+    install_runtime
     
     # Verify
     verify_installation
