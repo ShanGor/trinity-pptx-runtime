@@ -29,6 +29,9 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 `install.sh` downloads the GitHub release by default. If you have already built a local runtime artifact from a source checkout, use `--local` to install that artifact explicitly instead.
+When `install.sh` is run from a source checkout, it installs the checked-out `wrapper/trinity-pptx` over the downloaded bundle so wrapper fixes apply immediately. Standalone installs still repair older downloaded wrappers before runtime verification, including the extra sandbox mounts and bundled-library search paths needed by LibreOffice.
+The installer also rewrites LibreOffice bootstrap metadata inside the bundle to use bundle-relative paths instead of distro package paths such as `/usr/lib/libreoffice` and `/etc/libreoffice`.
+If an older release bundle still lacks bundled software-rendering files such as `libGL.so.1` and `swrast_dri.so`, the installer now reports that explicitly so you can rebuild and publish a refreshed release artifact instead of chasing a generic `soffice` failure.
 
 ### Usage
 
@@ -155,7 +158,7 @@ sudo ./build.sh
 3. Installs Python packages (markitdown[pptx], Pillow) into the bundled runtime
 4. Installs Node.js packages (pptxgenjs)
 5. Packages both `/usr` and `/usr/local` runtime assets needed by the tools
-6. Verifies the packaged artifact can import `markitdown` and `pptxgenjs`, and when `bwrap` is available also verifies sandboxed `soffice --version`
+6. Verifies the packaged artifact can import `markitdown` and `pptxgenjs`, and when `bwrap` is available also verifies sandboxed `soffice --headless --version`
 7. Optimizes by removing unnecessary files (docs, man pages, caches)
 
 #### Option 2: GitHub Actions (Recommended)

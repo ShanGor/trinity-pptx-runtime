@@ -110,14 +110,103 @@ get_download_url() {
     fi
 }
 
-repo_has_local_source() {
-    [ -f "${SCRIPT_DIR}/runtime/build.sh" ] && [ -f "${SCRIPT_DIR}/wrapper/trinity-pptx" ]
-}
-
 prepare_install_dir() {
     log_info "Creating installation directory: ${INSTALL_DIR}"
     rm -rf "${INSTALL_DIR}"
     mkdir -p "${INSTALL_DIR}"
+}
+
+repair_libreoffice_bundle_paths() {
+    local install_root="$1"
+    local program_dir="${install_root}/lib/libreoffice/program"
+    local fundamental_rc="${program_dir}/fundamentalrc"
+    local soffice_rc="${program_dir}/sofficerc"
+
+    if [ ! -d "$program_dir" ]; then
+        return 0
+    fi
+
+    if [ -f "$fundamental_rc" ]; then
+        log_info "Repairing LibreOffice bundle metadata for portable runtime paths..."
+        sed -i \
+            -e 's|^BRAND_BASE_DIR=file:///usr/lib/libreoffice$|BRAND_BASE_DIR=file://${ORIGIN}/..|' \
+            -e 's|file:///etc/libreoffice/registry|file://${ORIGIN}/../../../etc/libreoffice/registry|g' \
+            -e 's|file:///usr/share/java/hsqldb1.8.0.jar|file://${ORIGIN}/../../../share/java/hsqldb1.8.0.jar|g' \
+            "$fundamental_rc"
+    fi
+
+    if [ -f "$soffice_rc" ]; then
+        sed -i \
+            -e 's|file:///etc/libreoffice/sofficerc|file://${ORIGIN}/../../../etc/libreoffice/sofficerc|g' \
+            "$soffice_rc"
+    fi
+}
+
+repair_wrapper_script() {
+    local wrapper_path="$1"
+    local add_bin="0"
+    local add_usr_bin="0"
+    local temp_file=""
+
+    if [ ! -f "$wrapper_path" ]; then
+        return 0
+    fi
+
+    if ! grep -F -- '--ro-bind /bin /bin' "$wrapper_path" >/dev/null 2>&1; then
+        add_bin="1"
+    fi
+    if ! grep -F -- '--ro-bind /usr/bin /usr/bin' "$wrapper_path" >/dev/null 2>&1; then
+        add_usr_bin="1"
+    fi
+
+    if [ "$add_bin" = "0" ] && [ "$add_usr_bin" = "0" ]; then
+        :
+    fi
+
+    if [ "$add_bin" = "1" ] || [ "$add_usr_bin" = "1" ]; then
+        log_info "Applying wrapper compatibility repair for older sandbox mounts..."
+        temp_file="$(mktemp)"
+        awk -v add_bin="$add_bin" -v add_usr_bin="$add_usr_bin" '
+            /# Mount system directories for dependencies/ && !patched {
+                print
+                if (add_bin == "1") {
+                    print "    cmd=\"${cmd} --ro-bind /bin /bin\""
+                }
+                if (add_usr_bin == "1") {
+                    print "    cmd=\"${cmd} --ro-bind /usr/bin /usr/bin\""
+                }
+                patched = 1
+                next
+            }
+            { print }
+        ' "$wrapper_path" > "$temp_file"
+        mv "$temp_file" "$wrapper_path"
+    fi
+
+    # Standalone installs (for example curl | bash) do not have a local wrapper
+    # checkout to copy from, so patch the older release wrapper in place with the
+    # extra library search paths needed by the bundled LibreOffice runtime.
+    sed -i \
+        -e 's|--setenv LD_LIBRARY_PATH /runtime/lib:/lib:/lib64|--setenv LD_LIBRARY_PATH /runtime/lib:/runtime/lib/x86_64-linux-gnu:/runtime/lib/aarch64-linux-gnu:/runtime/lib/libreoffice/program:/lib:/lib64|g' \
+        -e 's|LD_LIBRARY_PATH="\$RUNTIME_DIR/lib:/lib:/lib64"|LD_LIBRARY_PATH="\$RUNTIME_DIR/lib:\$RUNTIME_DIR/lib/x86_64-linux-gnu:\$RUNTIME_DIR/lib/aarch64-linux-gnu:\$RUNTIME_DIR/lib/libreoffice/program:/lib:/lib64"|g' \
+        -e 's|vnd.sun.star.pathname:/runtime/share/libreoffice/program/fundamentalrc|vnd.sun.star.pathname:/runtime/lib/libreoffice/program/fundamentalrc|g' \
+        -e 's|vnd.sun.star.pathname:\${RUNTIME_DIR}/share/libreoffice/program/fundamentalrc|vnd.sun.star.pathname:\${RUNTIME_DIR}/lib/libreoffice/program/fundamentalrc|g' \
+        "$wrapper_path"
+    chmod +x "$wrapper_path"
+}
+
+install_runtime_wrapper() {
+    local wrapper_path="$1"
+    local current_wrapper="${SCRIPT_DIR}/wrapper/trinity-pptx"
+
+    if [ -f "$current_wrapper" ]; then
+        log_info "Installing current wrapper script from checkout..."
+        cp "$current_wrapper" "$wrapper_path"
+        chmod +x "$wrapper_path"
+        return
+    fi
+
+    repair_wrapper_script "$wrapper_path"
 }
 
 create_bin_symlink() {
@@ -132,6 +221,8 @@ extract_tarball_into_install_dir() {
     prepare_install_dir
     log_info "Extracting..."
     tar xzf "$tarball" -C "$INSTALL_DIR"
+    install_runtime_wrapper "${INSTALL_DIR}/trinity-pptx"
+    repair_libreoffice_bundle_paths "${INSTALL_DIR}"
     log_success "Extraction complete"
 }
 
@@ -141,6 +232,8 @@ copy_dist_into_install_dir() {
     prepare_install_dir
     log_info "Copying local runtime bundle..."
     cp -a "${dist_dir}/." "${INSTALL_DIR}/"
+    install_runtime_wrapper "${INSTALL_DIR}/trinity-pptx"
+    repair_libreoffice_bundle_paths "${INSTALL_DIR}"
     log_success "Local runtime copy complete"
 }
 
@@ -282,6 +375,8 @@ update_shell_config() {
 # Verify installation
 verify_installation() {
     log_info "Verifying installation..."
+    local python_verify_output=""
+    local soffice_verify_output=""
     
     if [ ! -x "${INSTALL_DIR}/trinity-pptx" ]; then
         log_error "Installation verification failed: trinity-pptx not found"
@@ -296,18 +391,27 @@ verify_installation() {
         log_warning "Could not verify version, but files are in place"
     fi
 
-    if "${INSTALL_DIR}/trinity-pptx" exec python3 -c "import markitdown, PIL" &> /dev/null; then
+    if python_verify_output=$("${INSTALL_DIR}/trinity-pptx" exec python3 -c "import markitdown, PIL" 2>&1); then
         log_success "Python extract dependencies verified"
     else
         log_error "Runtime verification failed: bundled Python dependencies are missing"
+        if [ -n "$python_verify_output" ]; then
+            echo "$python_verify_output" >&2
+        fi
         exit 1
     fi
 
     if command -v bwrap &> /dev/null; then
-        if "${INSTALL_DIR}/trinity-pptx" exec soffice --version &> /dev/null; then
+        if soffice_verify_output=$("${INSTALL_DIR}/trinity-pptx" exec soffice --headless --version 2>&1); then
             log_success "Sandboxed LibreOffice verified"
         else
             log_error "Runtime verification failed: sandboxed soffice is not executable"
+            if ! find "${INSTALL_DIR}/lib" -maxdepth 4 \( -name 'libGL.so*' -o -path '*/dri/swrast_dri.so' \) -print -quit | grep -q .; then
+                log_error "The installed runtime bundle is missing bundled OpenGL/software-rendering files (for example libGL.so.1 and swrast_dri.so). Publish or install a refreshed runtime release after rebuilding with the updated runtime/build.sh."
+            fi
+            if [ -n "$soffice_verify_output" ]; then
+                echo "$soffice_verify_output" >&2
+            fi
             exit 1
         fi
     fi
@@ -401,4 +505,6 @@ main() {
     print_usage
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

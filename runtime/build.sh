@@ -20,6 +20,27 @@ copy_tree_contents() {
     fi
 }
 
+repair_libreoffice_bundle_paths() {
+    local dist_root="$1"
+    local program_dir="$dist_root/lib/libreoffice/program"
+    local fundamental_rc="$program_dir/fundamentalrc"
+    local soffice_rc="$program_dir/sofficerc"
+
+    if [ -f "$fundamental_rc" ]; then
+        sed -i \
+            -e 's|^BRAND_BASE_DIR=file:///usr/lib/libreoffice$|BRAND_BASE_DIR=file://${ORIGIN}/..|' \
+            -e 's|file:///etc/libreoffice/registry|file://${ORIGIN}/../../../etc/libreoffice/registry|g' \
+            -e 's|file:///usr/share/java/hsqldb1.8.0.jar|file://${ORIGIN}/../../../share/java/hsqldb1.8.0.jar|g' \
+            "$fundamental_rc"
+    fi
+
+    if [ -f "$soffice_rc" ]; then
+        sed -i \
+            -e 's|file:///etc/libreoffice/sofficerc|file://${ORIGIN}/../../../etc/libreoffice/sofficerc|g' \
+            "$soffice_rc"
+    fi
+}
+
 verify_runtime_bundle() {
     echo "Verifying bundled runtime..."
 
@@ -45,7 +66,7 @@ verify_runtime_bundle() {
         node -e "require('pptxgenjs')"
 
     if command -v bwrap >/dev/null 2>&1; then
-        "$DIST_DIR/trinity-pptx" exec soffice --version >/dev/null
+        "$DIST_DIR/trinity-pptx" exec soffice --headless --version >/dev/null
     fi
 }
 
@@ -122,6 +143,12 @@ chroot "$ROOTFS" apt-get install -y --no-install-recommends \
     libreoffice-writer \
     libreoffice-calc \
     libreoffice-impress \
+    libegl1 \
+    libgbm1 \
+    libgl1 \
+    libgl1-mesa-dri \
+    libglx-mesa0 \
+    libopengl0 \
     poppler-utils \
     python3 \
     python3-pip \
@@ -187,6 +214,8 @@ copy_tree_contents "$ROOTFS/etc/libreoffice" "$DIST_DIR/etc/libreoffice"
 # Copy wrapper script
 cp "$PROJECT_ROOT/wrapper/trinity-pptx" "$DIST_DIR/"
 chmod +x "$DIST_DIR/trinity-pptx"
+
+repair_libreoffice_bundle_paths "$DIST_DIR"
 
 # Create version file
 echo "1.0.0" > "$DIST_DIR/VERSION"
