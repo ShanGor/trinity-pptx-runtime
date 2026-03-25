@@ -242,16 +242,17 @@ setup_env() {
         env_vars="${env_vars} --setenv PYTHONPATH ${python_path}"
     fi
     
-    # Add runtime library path
-    library_path="$(discover_library_path /runtime)"
     if command_needs_libreoffice_env "$tool_cmd"; then
+        # Generic runtime commands do not need an overridden loader path and are
+        # more stable without one. Keep the loader override only for LibreOffice.
+        library_path="$(discover_library_path /runtime)"
         libreoffice_program_path="$(discover_libreoffice_program_path /runtime)"
         library_path="$(append_path_entry "$library_path" "$libreoffice_program_path")"
-    fi
-    if [ -n "$library_path" ]; then
-        env_vars="${env_vars} --setenv LD_LIBRARY_PATH ${library_path}:/lib:/lib64"
-    else
-        env_vars="${env_vars} --setenv LD_LIBRARY_PATH /runtime/lib:/lib:/lib64"
+        if [ -n "$library_path" ]; then
+            env_vars="${env_vars} --setenv LD_LIBRARY_PATH ${library_path}:/lib:/lib64"
+        else
+            env_vars="${env_vars} --setenv LD_LIBRARY_PATH /runtime/lib:/lib:/lib64"
+        fi
     fi
     
     # Node.js modules path
@@ -352,15 +353,15 @@ exec_sandboxed() {
         mkdir -p "$runtime_home"
         runtime_pythonpath="$(discover_pythonpath "$RUNTIME_DIR")"
         runtime_nodepath="$(discover_node_path "$RUNTIME_DIR")"
-        runtime_library_path="$(discover_library_path "$RUNTIME_DIR")"
         if command_needs_libreoffice_env "$cmd"; then
+            runtime_library_path="$(discover_library_path "$RUNTIME_DIR")"
             runtime_library_path="$(append_path_entry "$runtime_library_path" "$(discover_libreoffice_program_path "$RUNTIME_DIR")")"
             runtime_dri_driver_path="$(discover_dri_driver_path "$RUNTIME_DIR")"
-        fi
-        if [ -n "$runtime_library_path" ]; then
-            runtime_library_path="${runtime_library_path}:/lib:/lib64"
-        else
-            runtime_library_path="$RUNTIME_DIR/lib:/lib:/lib64"
+            if [ -n "$runtime_library_path" ]; then
+                runtime_library_path="${runtime_library_path}:/lib:/lib64"
+            else
+                runtime_library_path="$RUNTIME_DIR/lib:/lib:/lib64"
+            fi
         fi
         if [ -n "$WORK_DIR" ]; then
             mapfile -d '' -t rewritten_args < <(rewrite_workdir_args "$@")
@@ -384,7 +385,6 @@ exec_sandboxed() {
                 else
                     HOME="$runtime_home" \
                     PATH="$RUNTIME_DIR/bin:/usr/bin:/bin" \
-                    LD_LIBRARY_PATH="$runtime_library_path" \
                     PYTHONPATH="$runtime_pythonpath" \
                     NODE_PATH="$runtime_nodepath" \
                     exec "$RUNTIME_DIR/bin/$cmd" "${rewritten_args[@]}"
@@ -405,7 +405,6 @@ exec_sandboxed() {
             else
                 HOME="$runtime_home" \
                 PATH="$RUNTIME_DIR/bin:/usr/bin:/bin" \
-                LD_LIBRARY_PATH="$runtime_library_path" \
                 PYTHONPATH="$runtime_pythonpath" \
                 NODE_PATH="$runtime_nodepath" \
                 exec "$RUNTIME_DIR/bin/$cmd" "${rewritten_args[@]}"
