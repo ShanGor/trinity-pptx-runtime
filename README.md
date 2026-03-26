@@ -31,6 +31,7 @@ export PATH="$HOME/.local/bin:$PATH"
 `install.sh` downloads the GitHub release by default. If you have already built a local runtime artifact from a source checkout, use `--local` to install that artifact explicitly instead.
 When `install.sh` is run from a source checkout, it installs the checked-out `wrapper/trinity-pptx` over the downloaded bundle so wrapper fixes apply immediately. Standalone installs still repair older downloaded wrappers before runtime verification, including the extra sandbox mounts and bundled-library search paths needed by LibreOffice.
 The wrapper now searches runtime loader paths under both `lib` and `usr/lib` multi-arch roots, so legacy bundles that place LibreOffice dependencies under `usr/lib/*-linux-gnu` (for example `libgpgmepp.so.6`) can still start `soffice` successfully.
+The installer and build now also repair LibreOffice program compatibility symlinks inside `lib/*-linux-gnu`, because some bundled UNO/bootstrap assets are resolved from those multi-arch roots during `soffice` startup.
 The installer also rewrites LibreOffice bootstrap metadata inside the bundle to use bundle-relative paths instead of distro package paths such as `/usr/lib/libreoffice` and `/etc/libreoffice`.
 If an older release bundle still lacks bundled software-rendering files such as `libGL.so.1` and `swrast_dri.so`, the installer now reports that explicitly so you can rebuild and publish a refreshed release artifact instead of chasing a generic `soffice` failure.
 

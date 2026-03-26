@@ -142,6 +142,46 @@ repair_libreoffice_bundle_paths() {
     fi
 }
 
+repair_libreoffice_program_compat_symlinks() {
+    local install_root="$1"
+    local program_dir="${install_root}/lib/libreoffice/program"
+    local arch_dir=""
+    local src=""
+    local base=""
+    local dst=""
+    local repaired="0"
+
+    if [ ! -d "$program_dir" ]; then
+        return 0
+    fi
+
+    while IFS= read -r arch_dir; do
+        for src in "$program_dir"/*; do
+            if [ ! -e "$src" ]; then
+                continue
+            fi
+
+            base="$(basename "$src")"
+            dst="${arch_dir}/${base}"
+
+            if [ -L "$dst" ] && [ ! -e "$dst" ]; then
+                rm -f "$dst"
+            fi
+
+            if [ -e "$dst" ] || [ -L "$dst" ]; then
+                continue
+            fi
+
+            ln -s "../libreoffice/program/${base}" "$dst"
+            repaired="1"
+        done
+    done < <(find "${install_root}/lib" -mindepth 1 -maxdepth 1 -type d -name '*-linux-gnu' | sort)
+
+    if [ "$repaired" = "1" ]; then
+        log_info "Repairing LibreOffice multi-arch compatibility symlinks..."
+    fi
+}
+
 repair_wrapper_script() {
     local wrapper_path="$1"
     local add_bin="0"
@@ -223,6 +263,7 @@ extract_tarball_into_install_dir() {
     tar xzf "$tarball" -C "$INSTALL_DIR"
     install_runtime_wrapper "${INSTALL_DIR}/trinity-pptx"
     repair_libreoffice_bundle_paths "${INSTALL_DIR}"
+    repair_libreoffice_program_compat_symlinks "${INSTALL_DIR}"
     log_success "Extraction complete"
 }
 
@@ -234,6 +275,7 @@ copy_dist_into_install_dir() {
     cp -a "${dist_dir}/." "${INSTALL_DIR}/"
     install_runtime_wrapper "${INSTALL_DIR}/trinity-pptx"
     repair_libreoffice_bundle_paths "${INSTALL_DIR}"
+    repair_libreoffice_program_compat_symlinks "${INSTALL_DIR}"
     log_success "Local runtime copy complete"
 }
 
@@ -406,6 +448,9 @@ verify_installation() {
             log_success "Sandboxed LibreOffice verified"
         else
             log_error "Runtime verification failed: sandboxed soffice is not executable"
+            if printf '%s' "$soffice_verify_output" | grep -F 'DeploymentException' >/dev/null 2>&1; then
+                log_error "LibreOffice bootstrap could not resolve packaged UNO/program assets. Rebuild or reinstall with the updated compatibility-symlink repair."
+            fi
             if ! find "${INSTALL_DIR}/lib" -maxdepth 4 \( -name 'libGL.so*' -o -path '*/dri/swrast_dri.so' \) -print -quit | grep -q .; then
                 log_error "The installed runtime bundle is missing bundled OpenGL/software-rendering files (for example libGL.so.1 and swrast_dri.so). Publish or install a refreshed runtime release after rebuilding with the updated runtime/build.sh."
             fi

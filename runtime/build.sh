@@ -41,6 +41,40 @@ repair_libreoffice_bundle_paths() {
     fi
 }
 
+repair_libreoffice_program_compat_symlinks() {
+    local dist_root="$1"
+    local program_dir="$dist_root/lib/libreoffice/program"
+    local arch_dir
+    local src
+    local base
+    local dst
+
+    if [ ! -d "$program_dir" ]; then
+        return 0
+    fi
+
+    while IFS= read -r arch_dir; do
+        for src in "$program_dir"/*; do
+            if [ ! -e "$src" ]; then
+                continue
+            fi
+
+            base="$(basename "$src")"
+            dst="${arch_dir}/${base}"
+
+            if [ -L "$dst" ] && [ ! -e "$dst" ]; then
+                rm -f "$dst"
+            fi
+
+            if [ -e "$dst" ] || [ -L "$dst" ]; then
+                continue
+            fi
+
+            ln -s "../libreoffice/program/${base}" "$dst"
+        done
+    done < <(find "$dist_root/lib" -mindepth 1 -maxdepth 1 -type d -name '*-linux-gnu' | sort)
+}
+
 verify_runtime_bundle() {
     echo "Verifying bundled runtime..."
 
@@ -216,6 +250,7 @@ cp "$PROJECT_ROOT/wrapper/trinity-pptx" "$DIST_DIR/"
 chmod +x "$DIST_DIR/trinity-pptx"
 
 repair_libreoffice_bundle_paths "$DIST_DIR"
+repair_libreoffice_program_compat_symlinks "$DIST_DIR"
 
 # Create version file
 echo "1.0.0" > "$DIST_DIR/VERSION"
