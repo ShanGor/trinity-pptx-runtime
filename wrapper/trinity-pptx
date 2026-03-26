@@ -111,8 +111,14 @@ discover_node_path() {
 append_path_entry() {
     local current="$1"
     local entry="$2"
+    local require_dir_check="${3:-1}"
 
-    if [ -z "$entry" ] || [ ! -d "$entry" ]; then
+    if [ -z "$entry" ]; then
+        echo "$current"
+        return
+    fi
+
+    if [ "$require_dir_check" = "1" ] && [ ! -d "$entry" ]; then
         echo "$current"
         return
     fi
@@ -136,20 +142,23 @@ discover_library_path() {
     local prefix="${1:-/runtime}"
     local library_path=""
     local dir
-
-    if [ ! -d "$RUNTIME_DIR/lib" ]; then
-        echo ""
-        return
-    fi
+    local root
+    local -a library_roots=("$RUNTIME_DIR/lib" "$RUNTIME_DIR/usr/lib")
 
     # Keep the loader path constrained to runtime system-library roots.
     # Scanning every .so-containing directory (for example Python package
     # trees) is too broad and can destabilize non-sandboxed Python startup.
-    library_path="$(append_path_entry "$library_path" "${prefix}/lib")"
+    for root in "${library_roots[@]}"; do
+        if [ ! -d "$root" ]; then
+            continue
+        fi
 
-    while IFS= read -r dir; do
-        library_path="$(append_path_entry "$library_path" "${prefix}${dir#$RUNTIME_DIR}")"
-    done < <(find "$RUNTIME_DIR/lib" -mindepth 1 -maxdepth 1 -type d -name '*-linux-gnu' | sort)
+        library_path="$(append_path_entry "$library_path" "${prefix}${root#$RUNTIME_DIR}" 0)"
+
+        while IFS= read -r dir; do
+            library_path="$(append_path_entry "$library_path" "${prefix}${dir#$RUNTIME_DIR}" 0)"
+        done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -name '*-linux-gnu' | sort)
+    done
 
     echo "$library_path"
 }
@@ -169,18 +178,21 @@ discover_dri_driver_path() {
     local prefix="${1:-/runtime}"
     local path
     local dri_path=""
+    local root
+    local -a library_roots=("$RUNTIME_DIR/lib" "$RUNTIME_DIR/usr/lib")
 
-    if [ ! -d "$RUNTIME_DIR/lib" ]; then
-        echo ""
-        return
-    fi
-
-    while IFS= read -r path; do
-        if [ -n "$dri_path" ]; then
-            dri_path="${dri_path}:"
+    for root in "${library_roots[@]}"; do
+        if [ ! -d "$root" ]; then
+            continue
         fi
-        dri_path="${dri_path}${prefix}${path#$RUNTIME_DIR}"
-    done < <(find "$RUNTIME_DIR/lib" -mindepth 2 -maxdepth 4 -type d -name dri | sort)
+
+        while IFS= read -r path; do
+            if [ -n "$dri_path" ]; then
+                dri_path="${dri_path}:"
+            fi
+            dri_path="${dri_path}${prefix}${path#$RUNTIME_DIR}"
+        done < <(find "$root" -mindepth 2 -maxdepth 4 -type d -name dri | sort)
+    done
 
     echo "$dri_path"
 }
@@ -247,7 +259,7 @@ setup_env() {
         # more stable without one. Keep the loader override only for LibreOffice.
         library_path="$(discover_library_path /runtime)"
         libreoffice_program_path="$(discover_libreoffice_program_path /runtime)"
-        library_path="$(append_path_entry "$library_path" "$libreoffice_program_path")"
+        library_path="$(append_path_entry "$library_path" "$libreoffice_program_path" 0)"
         if [ -n "$library_path" ]; then
             env_vars="${env_vars} --setenv LD_LIBRARY_PATH ${library_path}:/lib:/lib64"
         else
@@ -355,7 +367,7 @@ exec_sandboxed() {
         runtime_nodepath="$(discover_node_path "$RUNTIME_DIR")"
         if command_needs_libreoffice_env "$cmd"; then
             runtime_library_path="$(discover_library_path "$RUNTIME_DIR")"
-            runtime_library_path="$(append_path_entry "$runtime_library_path" "$(discover_libreoffice_program_path "$RUNTIME_DIR")")"
+            runtime_library_path="$(append_path_entry "$runtime_library_path" "$(discover_libreoffice_program_path "$RUNTIME_DIR")" 0)"
             runtime_dri_driver_path="$(discover_dri_driver_path "$RUNTIME_DIR")"
             if [ -n "$runtime_library_path" ]; then
                 runtime_library_path="${runtime_library_path}:/lib:/lib64"
