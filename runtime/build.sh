@@ -331,10 +331,14 @@ EOF
     # Add Node.js repository
     chroot "$ROOTFS" bash -c "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -"
 
-    # Install all packages
+    # Install all packages.
+    # libreoffice-sdbc-hsqldb stays explicit because libreoffice-base-drivers
+    # only recommends it, and this build intentionally uses
+    # --no-install-recommends to keep the bundle size down.
     chroot "$ROOTFS" apt-get install -y --no-install-recommends \
         libreoffice-nogui \
         libreoffice-java-common \
+        libreoffice-sdbc-hsqldb \
         libegl1 \
         libgbm1 \
         libgl1 \
