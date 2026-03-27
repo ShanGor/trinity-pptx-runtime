@@ -88,7 +88,7 @@ discover_pythonpath() {
             python_path="${python_path}:"
         fi
         python_path="${python_path}${prefix}${path#$RUNTIME_DIR}"
-    done < <(find "$RUNTIME_DIR/lib" -mindepth 2 -maxdepth 2 -type d \( -name dist-packages -o -name site-packages \) | sort)
+    done < <(find -L "$RUNTIME_DIR/lib" -mindepth 2 -maxdepth 2 -type d \( -name dist-packages -o -name site-packages \) | sort)
 
     echo "$python_path"
 }
@@ -103,7 +103,7 @@ discover_node_path() {
             node_path="${node_path}:"
         fi
         node_path="${node_path}${prefix}${path#$RUNTIME_DIR}"
-    done < <(find "$RUNTIME_DIR/lib" -mindepth 1 -maxdepth 2 -type d -name node_modules | sort)
+    done < <(find -L "$RUNTIME_DIR/lib" -mindepth 1 -maxdepth 2 -type d -name node_modules | sort)
 
     echo "$node_path"
 }
@@ -157,7 +157,7 @@ discover_library_path() {
 
         while IFS= read -r dir; do
             library_path="$(append_path_entry "$library_path" "${prefix}${dir#$RUNTIME_DIR}" 0)"
-        done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -name '*-linux-gnu' | sort)
+        done < <(find -L "$root" -mindepth 1 -maxdepth 1 -type d -name '*-linux-gnu' | sort)
     done
 
     echo "$library_path"
@@ -191,7 +191,7 @@ discover_dri_driver_path() {
                 dri_path="${dri_path}:"
             fi
             dri_path="${dri_path}${prefix}${path#$RUNTIME_DIR}"
-        done < <(find "$root" -mindepth 2 -maxdepth 4 -type d -name dri | sort)
+        done < <(find -L "$root" -mindepth 2 -maxdepth 4 -type d -name dri | sort)
     done
 
     echo "$dri_path"
@@ -206,6 +206,17 @@ command_needs_libreoffice_env() {
             return 1
             ;;
     esac
+}
+
+runtime_has_libreoffice_rootfs() {
+    [ -x "$RUNTIME_DIR/rootfs/usr/bin/soffice" ] && \
+        [ -d "$RUNTIME_DIR/rootfs/usr/lib/libreoffice" ] && \
+        [ -d "$RUNTIME_DIR/rootfs/etc/libreoffice" ]
+}
+
+command_uses_libreoffice_rootfs() {
+    command_needs_libreoffice_env "${1:-}" || return 1
+    runtime_has_libreoffice_rootfs
 }
 
 rewrite_workdir_args() {
@@ -291,9 +302,67 @@ setup_env() {
 }
 
 # Build bubblewrap command
+append_ro_bind_if_exists() {
+    local cmd="$1"
+    local source="$2"
+    local target="$3"
+
+    if [ -e "$source" ] || [ -L "$source" ]; then
+        echo "${cmd} --ro-bind ${source} ${target}"
+    else
+        echo "$cmd"
+    fi
+}
+
+build_libreoffice_rootfs_bwrap_cmd() {
+    local rootfs="${RUNTIME_DIR}/rootfs"
+    local cmd=""
+
+    cmd="${cmd} --unshare-all"
+    cmd="${cmd} --share-net"
+    cmd="${cmd} --die-with-parent"
+
+    cmd="$(append_ro_bind_if_exists "$cmd" "${rootfs}/bin" /bin)"
+    cmd="$(append_ro_bind_if_exists "$cmd" "${rootfs}/lib" /lib)"
+    cmd="$(append_ro_bind_if_exists "$cmd" "${rootfs}/lib64" /lib64)"
+    cmd="$(append_ro_bind_if_exists "$cmd" "${rootfs}/usr/bin" /usr/bin)"
+    cmd="$(append_ro_bind_if_exists "$cmd" "${rootfs}/usr/lib" /usr/lib)"
+    cmd="$(append_ro_bind_if_exists "$cmd" "${rootfs}/usr/lib64" /usr/lib64)"
+    cmd="$(append_ro_bind_if_exists "$cmd" "${rootfs}/usr/share" /usr/share)"
+    cmd="$(append_ro_bind_if_exists "$cmd" "${rootfs}/etc" /etc)"
+    cmd="$(append_ro_bind_if_exists "$cmd" "${rootfs}/var/lib/libreoffice" /var/lib/libreoffice)"
+    cmd="$(append_ro_bind_if_exists "$cmd" "${rootfs}/var/spool/libreoffice" /var/spool/libreoffice)"
+
+    cmd="${cmd} --proc /proc"
+    cmd="${cmd} --dev /dev"
+    cmd="${cmd} --tmpfs /tmp"
+    cmd="${cmd} --tmpfs /tmp/home"
+
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
+        cmd="${cmd} --bind ${WORK_DIR} /work"
+        cmd="${cmd} --setenv WORKDIR /work"
+    fi
+
+    cmd="${cmd} --setenv HOME /tmp/home"
+    cmd="${cmd} --setenv PATH /usr/bin:/bin"
+    cmd="${cmd} --setenv SAL_DISABLESKIA 1"
+    cmd="${cmd} --setenv LIBGL_ALWAYS_SOFTWARE 1"
+
+    if [ -n "${TRINITY_BWRAP_OPTS:-}" ]; then
+        cmd="${cmd} ${TRINITY_BWRAP_OPTS}"
+    fi
+
+    echo "$cmd"
+}
+
 build_bwrap_cmd() {
     local tool_cmd="${1:-}"
     local cmd=""
+
+    if command_uses_libreoffice_rootfs "$tool_cmd"; then
+        build_libreoffice_rootfs_bwrap_cmd
+        return
+    fi
     
     # Basic sandbox setup
     cmd="${cmd} --unshare-all"
@@ -348,11 +417,31 @@ exec_sandboxed() {
     local runtime_library_path=""
     local runtime_dri_driver_path=""
     local -a rewritten_args=()
+
+    if command_uses_libreoffice_rootfs "$cmd" && ! command -v bwrap &> /dev/null; then
+        echo "Error: bundled LibreOffice requires bubblewrap to create its runtime filesystem view." >&2
+        echo "Install bubblewrap and run without --no-sandbox." >&2
+        exit 1
+    fi
+
+    if command_uses_libreoffice_rootfs "$cmd" && [ "$USE_BWRAP" != true ]; then
+        echo "Error: bundled LibreOffice requires bubblewrap to create its runtime filesystem view." >&2
+        echo "Remove --no-sandbox (or unset TRINITY_NO_SANDBOX) before running soffice commands." >&2
+        exit 1
+    fi
     
     if [ "$USE_BWRAP" = true ] && command -v bwrap &> /dev/null; then
         log "Using bubblewrap sandbox"
         local bwrap_args
         bwrap_args=$(build_bwrap_cmd "$cmd")
+
+        if command_uses_libreoffice_rootfs "$cmd"; then
+            if [ -n "$WORK_DIR" ]; then
+                exec bwrap $bwrap_args --chdir /work /usr/bin/$cmd "$@"
+            else
+                exec bwrap $bwrap_args /usr/bin/$cmd "$@"
+            fi
+        fi
         
         # Change to work directory if specified
         if [ -n "$WORK_DIR" ]; then

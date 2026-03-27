@@ -15,6 +15,13 @@ All tools run inside a [bubblewrap](https://github.com/containers/bubblewrap) sa
 
 ## Quick Start
 
+### Build Package at local
+```bash
+export UBUNTU_REPO=http://mirrors.aliyun.com/ubuntu
+export PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+bash runtime/build.sh
+```
+
 ### Installation
 
 ```bash

@@ -22,6 +22,16 @@ copy_tree_contents() {
     fi
 }
 
+copy_path_into_dir() {
+    local src="$1"
+    local dst_dir="$2"
+
+    if [ -e "$src" ] || [ -L "$src" ]; then
+        mkdir -p "$dst_dir"
+        cp -a "$src" "$dst_dir"/
+    fi
+}
+
 path_mount_options() {
     local path="$1"
     local probe="$path"
@@ -65,6 +75,79 @@ choose_build_dir() {
     fi
 
     mktemp -d "${TMPDIR:-/tmp}/trinity-pptx-runtime-build.XXXXXX"
+}
+
+resolve_ubuntu_repo() {
+    local deb_arch="$1"
+
+    if [ -n "${UBUNTU_REPO:-}" ]; then
+        echo "$UBUNTU_REPO"
+        return 0
+    fi
+
+    if [ "$deb_arch" = "arm64" ]; then
+        echo "http://ports.ubuntu.com/ubuntu-ports"
+    else
+        echo "http://archive.ubuntu.com/ubuntu"
+    fi
+}
+
+run_in_chroot() {
+    local rootfs="$1"
+    local passthrough_var=""
+    local -a env_vars=(
+        HOME=/root
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        LANG=C.UTF-8
+        LC_ALL=C.UTF-8
+        DEBIAN_FRONTEND=noninteractive
+        PIP_DISABLE_PIP_VERSION_CHECK=1
+    )
+
+    shift
+
+    for passthrough_var in \
+        HTTP_PROXY \
+        HTTPS_PROXY \
+        NO_PROXY \
+        NPM_CONFIG_REGISTRY \
+        PIP_EXTRA_INDEX_URL \
+        PIP_FIND_LINKS \
+        PIP_INDEX_URL \
+        PIP_NO_INDEX \
+        PIP_TRUSTED_HOST \
+        http_proxy \
+        https_proxy \
+        no_proxy \
+        npm_config_registry
+    do
+        if [ -n "${!passthrough_var:-}" ]; then
+            env_vars+=("${passthrough_var}=${!passthrough_var}")
+        fi
+    done
+
+    chroot "$rootfs" /usr/bin/env "${env_vars[@]}" "$@"
+}
+
+cleanup_chroot_environment() {
+    local rootfs="$1"
+
+    umount -R "$rootfs/dev" >/dev/null 2>&1 || true
+    umount -R "$rootfs/sys" >/dev/null 2>&1 || true
+    umount "$rootfs/proc" >/dev/null 2>&1 || true
+}
+
+prepare_chroot_environment() {
+    local rootfs="$1"
+
+    mkdir -p "$rootfs/proc" "$rootfs/sys" "$rootfs/dev"
+    cleanup_chroot_environment "$rootfs"
+
+    mount -t proc proc "$rootfs/proc"
+    mount --rbind /sys "$rootfs/sys"
+    mount --make-rslave "$rootfs/sys"
+    mount --rbind /dev "$rootfs/dev"
+    mount --make-rslave "$rootfs/dev"
 }
 
 repair_libreoffice_bundle_paths() {
@@ -237,9 +320,25 @@ verify_runtime_bundle() {
     TRINITY_NO_SANDBOX=1 "$DIST_DIR/trinity-pptx" exec \
         node -e "require('pptxgenjs')"
 
-    env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS \
-        TRINITY_NO_SANDBOX=1 "$DIST_DIR/trinity-pptx" exec \
-        soffice --headless --version >/dev/null
+    if [ -d "$DIST_DIR/rootfs/usr/bin" ] && [ -d "$DIST_DIR/rootfs/usr/lib/libreoffice" ]; then
+        prepare_chroot_environment "$DIST_DIR/rootfs"
+        if ! run_in_chroot "$DIST_DIR/rootfs" /usr/bin/env \
+            -u DISPLAY \
+            -u WAYLAND_DISPLAY \
+            -u XDG_RUNTIME_DIR \
+            -u DBUS_SESSION_BUS_ADDRESS \
+            /usr/bin/soffice --headless --version >/dev/null
+        then
+            cleanup_chroot_environment "$DIST_DIR/rootfs"
+            echo "Bundled rootfs soffice failed to start"
+            exit 1
+        fi
+        cleanup_chroot_environment "$DIST_DIR/rootfs"
+    else
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS \
+            TRINITY_NO_SANDBOX=1 "$DIST_DIR/trinity-pptx" exec \
+            soffice --headless --version >/dev/null
+    fi
 
     if bwrap_is_usable; then
         env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS \
@@ -269,6 +368,7 @@ main() {
     fi
 
     # Clean previous builds
+    cleanup_chroot_environment "$ROOTFS"
     rm -rf "$DIST_DIR" "$BUILD_DIR"
     mkdir -p "$DIST_DIR" "$BUILD_DIR"
 
@@ -287,12 +387,9 @@ main() {
 
     echo "Building for architecture: $ARCH ($DEB_ARCH)"
 
-    # Set Ubuntu repository URL based on architecture
-    if [ "$DEB_ARCH" = "arm64" ]; then
-        UBUNTU_REPO="http://ports.ubuntu.com/ubuntu-ports"
-    else
-        UBUNTU_REPO="http://archive.ubuntu.com/ubuntu"
-    fi
+    # Allow callers to override the Ubuntu mirror while preserving
+    # architecture-specific defaults for normal builds.
+    UBUNTU_REPO="$(resolve_ubuntu_repo "$DEB_ARCH")"
     echo "Using repository: $UBUNTU_REPO"
 
     # Create minimal Ubuntu rootfs
@@ -318,24 +415,28 @@ deb $UBUNTU_REPO jammy-updates main universe
 deb $UBUNTU_REPO jammy-security main universe
 EOF
 
+    # Package post-install hooks need a normal chroot view of /proc and /dev.
+    prepare_chroot_environment "$ROOTFS"
+    trap 'cleanup_chroot_environment "$ROOTFS"' EXIT
+
     # Install required packages in chroot
     echo "Installing packages..."
-    chroot "$ROOTFS" apt-get update
+    run_in_chroot "$ROOTFS" apt-get update
 
     # Install basic packages first
-    chroot "$ROOTFS" apt-get install -y --no-install-recommends \
+    run_in_chroot "$ROOTFS" apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         gnupg
 
     # Add Node.js repository
-    chroot "$ROOTFS" bash -c "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -"
+    run_in_chroot "$ROOTFS" bash -c "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -"
 
     # Install all packages.
     # libreoffice-sdbc-hsqldb stays explicit because libreoffice-base-drivers
     # only recommends it, and this build intentionally uses
     # --no-install-recommends to keep the bundle size down.
-    chroot "$ROOTFS" apt-get install -y --no-install-recommends \
+    run_in_chroot "$ROOTFS" apt-get install -y --no-install-recommends \
         libreoffice-nogui \
         libreoffice-java-common \
         libreoffice-sdbc-hsqldb \
@@ -355,23 +456,28 @@ EOF
         fonts-freefont-ttf
 
     # Clean up apt cache
-    chroot "$ROOTFS" apt-get clean
-    chroot "$ROOTFS" rm -rf /var/lib/apt/lists/*
+    run_in_chroot "$ROOTFS" apt-get clean
+    run_in_chroot "$ROOTFS" rm -rf /var/lib/apt/lists/*
 
     # Install Python packages into the bundled runtime path.
     # Using --target ensures the package lands inside the runtime bundle. We also
     # keep packaging logic tolerant of dependencies that still install into
     # /usr/local on future distro or toolchain changes.
     echo "Installing Python packages..."
-    chroot "$ROOTFS" mkdir -p /usr/lib/python3/dist-packages
-    chroot "$ROOTFS" pip3 install --no-cache-dir \
+    run_in_chroot "$ROOTFS" mkdir -p /usr/lib/python3/dist-packages
+    run_in_chroot "$ROOTFS" pip3 install --no-cache-dir \
+        --retries "${PIP_RETRIES:-10}" \
+        --timeout "${PIP_TIMEOUT:-300}" \
         --target /usr/lib/python3/dist-packages \
         markitdown[pptx] \
         Pillow
 
     # Install Node.js packages globally
     echo "Installing Node.js packages..."
-    chroot "$ROOTFS" npm install -g pptxgenjs
+    run_in_chroot "$ROOTFS" npm install -g pptxgenjs
+
+    cleanup_chroot_environment "$ROOTFS"
+    trap - EXIT
 
     # Remove unnecessary files to reduce size
     echo "Optimizing rootfs size..."
@@ -384,38 +490,28 @@ EOF
     find "$ROOTFS/usr/lib/python3" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
     find "$ROOTFS/usr/lib/python3" -name "*.pyc" -delete 2>/dev/null || true
 
-    # Copy to dist with proper structure
+    # Copy to dist with a preserved rootfs for LibreOffice and top-level
+    # compatibility symlinks for the existing wrapper/runtime contract.
     echo "Creating distribution package..."
-    mkdir -p "$DIST_DIR/bin" "$DIST_DIR/lib" "$DIST_DIR/share" "$DIST_DIR/var"
+    mkdir -p "$DIST_DIR/rootfs" "$DIST_DIR/rootfs/var/lib" "$DIST_DIR/rootfs/var/spool"
 
-    # Copy binaries
-    copy_tree_contents "$ROOTFS/usr/bin" "$DIST_DIR/bin"
-    copy_tree_contents "$ROOTFS/usr/local/bin" "$DIST_DIR/bin"
-    copy_tree_contents "$ROOTFS/usr/lib" "$DIST_DIR/lib"
-    copy_tree_contents "$ROOTFS/usr/local/lib" "$DIST_DIR/lib"
-    copy_tree_contents "$ROOTFS/usr/lib64" "$DIST_DIR/lib"
+    copy_path_into_dir "$ROOTFS/bin" "$DIST_DIR/rootfs"
+    copy_path_into_dir "$ROOTFS/lib" "$DIST_DIR/rootfs"
+    copy_path_into_dir "$ROOTFS/lib64" "$DIST_DIR/rootfs"
+    copy_path_into_dir "$ROOTFS/usr" "$DIST_DIR/rootfs"
+    copy_path_into_dir "$ROOTFS/etc" "$DIST_DIR/rootfs"
+    copy_path_into_dir "$ROOTFS/var/lib/libreoffice" "$DIST_DIR/rootfs/var/lib"
+    copy_path_into_dir "$ROOTFS/var/spool/libreoffice" "$DIST_DIR/rootfs/var/spool"
 
-    # Copy share directories (LibreOffice needs these)
-    copy_tree_contents "$ROOTFS/usr/share/libreoffice" "$DIST_DIR/share/libreoffice"
-    copy_tree_contents "$ROOTFS/usr/share/fonts" "$DIST_DIR/share/fonts"
-    copy_tree_contents "$ROOTFS/usr/share/java" "$DIST_DIR/share/java"
-    copy_tree_contents "$ROOTFS/usr/share/perl" "$DIST_DIR/share/perl"
-    copy_tree_contents "$ROOTFS/usr/share/pixmaps" "$DIST_DIR/share/pixmaps"
-    copy_tree_contents "$ROOTFS/usr/share/xml" "$DIST_DIR/share/xml"
-    copy_tree_contents "$ROOTFS/var/lib/libreoffice" "$DIST_DIR/var/lib/libreoffice"
-    copy_tree_contents "$ROOTFS/var/spool/libreoffice" "$DIST_DIR/var/spool/libreoffice"
-
-    # Copy etc for LibreOffice configuration
-    mkdir -p "$DIST_DIR/etc"
-    copy_tree_contents "$ROOTFS/etc/libreoffice" "$DIST_DIR/etc/libreoffice"
+    ln -s "rootfs/usr/bin" "$DIST_DIR/bin"
+    ln -s "rootfs/usr/lib" "$DIST_DIR/lib"
+    ln -s "rootfs/usr/share" "$DIST_DIR/share"
+    ln -s "rootfs/etc" "$DIST_DIR/etc"
+    ln -s "rootfs/var" "$DIST_DIR/var"
 
     # Copy wrapper script
     cp "$PROJECT_ROOT/wrapper/trinity-pptx" "$DIST_DIR/"
     chmod +x "$DIST_DIR/trinity-pptx"
-
-    repair_libreoffice_bundle_paths "$DIST_DIR"
-    repair_libreoffice_program_compat_symlinks "$DIST_DIR"
-    repair_libreoffice_share_symlinks "$DIST_DIR"
 
     # Create version file
     echo "1.0.0" > "$DIST_DIR/VERSION"

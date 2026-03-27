@@ -117,6 +117,26 @@ prepare_install_dir() {
     mkdir -p "${INSTALL_DIR}"
 }
 
+runtime_preserves_libreoffice_rootfs() {
+    local install_root="$1"
+
+    [ -x "${install_root}/rootfs/usr/bin/soffice" ] && \
+        [ -d "${install_root}/rootfs/usr/lib/libreoffice" ] && \
+        [ -d "${install_root}/rootfs/etc/libreoffice" ]
+}
+
+finalize_libreoffice_runtime_layout() {
+    local install_root="$1"
+
+    if runtime_preserves_libreoffice_rootfs "$install_root"; then
+        return 0
+    fi
+
+    repair_libreoffice_bundle_paths "${install_root}"
+    repair_libreoffice_program_compat_symlinks "${install_root}"
+    repair_libreoffice_share_symlinks "${install_root}"
+}
+
 repair_libreoffice_bundle_paths() {
     local install_root="$1"
     local program_dir="${install_root}/lib/libreoffice/program"
@@ -347,9 +367,7 @@ extract_tarball_into_install_dir() {
     log_info "Extracting..."
     tar xzf "$tarball" --no-same-owner -C "$INSTALL_DIR"
     install_runtime_wrapper "${INSTALL_DIR}/trinity-pptx"
-    repair_libreoffice_bundle_paths "${INSTALL_DIR}"
-    repair_libreoffice_program_compat_symlinks "${INSTALL_DIR}"
-    repair_libreoffice_share_symlinks "${INSTALL_DIR}"
+    finalize_libreoffice_runtime_layout "${INSTALL_DIR}"
     log_success "Extraction complete"
 }
 
@@ -360,9 +378,7 @@ copy_dist_into_install_dir() {
     log_info "Copying local runtime bundle..."
     cp -a "${dist_dir}/." "${INSTALL_DIR}/"
     install_runtime_wrapper "${INSTALL_DIR}/trinity-pptx"
-    repair_libreoffice_bundle_paths "${INSTALL_DIR}"
-    repair_libreoffice_program_compat_symlinks "${INSTALL_DIR}"
-    repair_libreoffice_share_symlinks "${INSTALL_DIR}"
+    finalize_libreoffice_runtime_layout "${INSTALL_DIR}"
     log_success "Local runtime copy complete"
 }
 
@@ -593,7 +609,7 @@ verify_installation() {
             if printf '%s' "$soffice_verify_output" | grep -F 'DeploymentException' >/dev/null 2>&1; then
                 log_error "LibreOffice bootstrap could not resolve packaged UNO/program assets. Rebuild or reinstall with the updated compatibility-symlink repair."
             fi
-            if ! find "${INSTALL_DIR}/lib" -maxdepth 4 \( -name 'libGL.so*' -o -path '*/dri/swrast_dri.so' \) -print -quit | grep -q .; then
+            if ! find -L "${INSTALL_DIR}/lib" -maxdepth 4 \( -name 'libGL.so*' -o -path '*/dri/swrast_dri.so' \) -print -quit | grep -q .; then
                 log_error "The installed runtime bundle is missing bundled OpenGL/software-rendering files (for example libGL.so.1 and swrast_dri.so). Publish or install a refreshed runtime release after rebuilding with the updated runtime/build.sh."
             fi
             if [ -n "$soffice_verify_output" ]; then
