@@ -23,7 +23,7 @@ chmod +x "${runtime_dir}/bin/soffice"
 
 cat > "${runtime_dir}/bin/python3" << 'INNER'
 #!/bin/sh
-if [ "${1:-}" = "-m" ] && [ "${2:-}" = "markitdown" ]; then
+if [ "${1:-}" = "-c" ]; then
     cat <<'EOF'
 <!-- Slide number: 1 -->
 Thumbnail Fallback

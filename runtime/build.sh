@@ -363,6 +363,25 @@ repair_libreoffice_share_symlinks() {
     ln -s "../../../../var/spool/libreoffice/uno_packages/cache" "$share_dir/uno_packages/cache"
 }
 
+verify_markitdown_runtime() {
+    local script='
+import importlib
+import PIL
+
+last_error = None
+for module_name in ("markitdown", "markitdown_no_magika"):
+    try:
+        importlib.import_module(module_name)
+        break
+    except Exception as exc:
+        last_error = exc
+else:
+    raise last_error or ModuleNotFoundError("No MarkItDown module is available")
+'
+
+    TRINITY_NO_SANDBOX=1 "$DIST_DIR/trinity-pptx" exec python3 -c "$script" >/dev/null
+}
+
 verify_runtime_bundle() {
     echo "Verifying bundled runtime..."
 
@@ -396,8 +415,7 @@ verify_runtime_bundle() {
         exit 1
     fi
 
-    TRINITY_NO_SANDBOX=1 "$DIST_DIR/trinity-pptx" exec \
-        python3 -c "import markitdown, PIL; print(markitdown.__file__)" >/dev/null
+    verify_markitdown_runtime
 
     TRINITY_NO_SANDBOX=1 "$DIST_DIR/trinity-pptx" exec \
         node -e "require('pptxgenjs')"

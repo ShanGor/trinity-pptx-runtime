@@ -69,7 +69,7 @@ trinity-pptx thumbnail presentation.pptx preview.jpg
 trinity-pptx create my-script.js output.pptx
 
 # Execute arbitrary command in sandbox
-trinity-pptx exec python3 -m markitdown presentation.pptx
+trinity-pptx exec python3 -c "print('hello from runtime')"
 ```
 
 ## Commands

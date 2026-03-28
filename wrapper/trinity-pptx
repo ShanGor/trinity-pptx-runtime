@@ -56,7 +56,7 @@ Examples:
   trinity-pptx convert presentation.pptx output.pdf
   trinity-pptx extract slides.pptx
   trinity-pptx create my-presentation.js deck.pptx
-  trinity-pptx exec python3 -m markitdown presentation.pptx
+  trinity-pptx extract presentation.pptx > content.md
 
 Environment Variables:
   TRINITY_PPTX_RUNTIME    Path to runtime directory (overrides auto-detect)
@@ -71,6 +71,34 @@ log() {
     if [ "$VERBOSE" = true ]; then
         echo "[trinity-pptx] $*" >&2
     fi
+}
+
+run_markitdown() {
+    local input_path="$1"
+    local script='
+import sys
+
+last_error = None
+MarkItDown = None
+for module_name in ("markitdown", "markitdown_no_magika"):
+    try:
+        module = __import__(module_name, fromlist=["MarkItDown"])
+        MarkItDown = getattr(module, "MarkItDown")
+        break
+    except Exception as exc:
+        last_error = exc
+
+if MarkItDown is None:
+    raise last_error or ModuleNotFoundError("No MarkItDown module is available")
+
+result = MarkItDown().convert(sys.argv[1])
+output = getattr(result, "markdown", None)
+if output is None:
+    output = getattr(result, "text_content", "")
+sys.stdout.write(output)
+'
+
+    run_sandboxed python3 -c "$script" "$input_path"
 }
 
 # Detect if running in sandboxed environment
@@ -480,7 +508,7 @@ generate_fallback_pdf() {
     local output_path="$2"
     local markdown_content=""
 
-    if markdown_content="$(run_sandboxed python3 -m markitdown "/input/$input_name" 2>/dev/null)"; then
+    if markdown_content="$(run_markitdown "/input/$input_name" 2>/dev/null)"; then
         :
     else
         markdown_content=""
@@ -854,7 +882,7 @@ extract_text() {
     local input_name
     input_name=$(basename "$input_path")
     
-    run_sandboxed python3 -m markitdown "/input/$input_name"
+    run_markitdown "/input/$input_name"
 }
 
 # Generate thumbnail
