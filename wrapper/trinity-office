@@ -909,6 +909,7 @@ run_rootfs_command_without_sandbox() {
     local cmd="$1"
     shift
     local runtime_home="${TMPDIR:-/tmp}/trinity-office-home"
+    local rootfs="${RUNTIME_DIR}/rootfs"
     local rootfs_command=""
     local rootfs_loader=""
     local rootfs_library_path=""
@@ -922,7 +923,65 @@ run_rootfs_command_without_sandbox() {
     fi
 
     mkdir -p "$runtime_home"
-    runtime_nodepath="$(discover_node_path "$RUNTIME_DIR")"
+    runtime_nodepath="$(discover_rootfs_node_path)"
+
+    local chroot_bin=""
+    for chroot_bin in /usr/sbin/chroot /sbin/chroot; do
+        if [ -x "$chroot_bin" ]; then
+            break
+        fi
+        chroot_bin=""
+    done
+
+    if command -v unshare &> /dev/null && [ -n "$chroot_bin" ]; then
+        mkdir -p "$rootfs/tmp/home"
+
+        if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
+            mkdir -p "$rootfs/work"
+            mount --bind "$WORK_DIR" "$rootfs/work" 2>/dev/null || true
+        fi
+
+        if [ -n "$INPUT_DIR" ] && [ -d "$INPUT_DIR" ]; then
+            mkdir -p "$rootfs/input"
+            mount --bind -o ro "$INPUT_DIR" "$rootfs/input" 2>/dev/null || true
+        fi
+
+        local -a rewritten_args=()
+        local arg
+        for arg in "$@"; do
+            if [ -n "$INPUT_DIR" ] && [ "$arg" = "$INPUT_DIR" ]; then
+                rewritten_args+=("/input")
+            elif [ -n "$INPUT_DIR" ] && [[ "$arg" == "$INPUT_DIR"/* ]]; then
+                rewritten_args+=("/input/${arg#$INPUT_DIR/}")
+            elif [ -n "$WORK_DIR" ] && [ "$arg" = "$WORK_DIR" ]; then
+                rewritten_args+=("/work")
+            elif [ -n "$WORK_DIR" ] && [[ "$arg" == "$WORK_DIR"/* ]]; then
+                rewritten_args+=("/work/${arg#$WORK_DIR/}")
+            else
+                rewritten_args+=("$arg")
+            fi
+        done
+
+        local guest_cmd
+        guest_cmd="$(discover_rootfs_command_guest_path "$cmd")"
+
+        HOME="/tmp/home" \
+        LANG="C.UTF-8" \
+        LC_ALL="C.UTF-8" \
+        PATH="/usr/local/bin:/usr/bin:/bin" \
+        NODE_PATH="$runtime_nodepath" \
+        unshare -mr "$chroot_bin" "$rootfs" "$guest_cmd" "${rewritten_args[@]}"
+        local rc=$?
+
+        if [ -n "$WORK_DIR" ] && [ -d "$rootfs/work" ]; then
+            umount -l "$rootfs/work" 2>/dev/null || true
+        fi
+        if [ -n "$INPUT_DIR" ] && [ -d "$rootfs/input" ]; then
+            umount -l "$rootfs/input" 2>/dev/null || true
+        fi
+
+        return $rc
+    fi
 
     if command_is_elf_binary "$rootfs_command"; then
         rootfs_loader="$(discover_rootfs_loader_path)"
@@ -957,15 +1016,11 @@ run_sandboxed() {
     local rootfs_command=""
 
     if command_uses_runtime_rootfs "$cmd" && command_requires_rootfs_bwrap "$cmd" && ! command -v bwrap &> /dev/null; then
-        echo "Error: bundled ${cmd} requires bubblewrap to create its runtime filesystem view." >&2
-        echo "Install bubblewrap and run without --no-sandbox." >&2
-        exit 1
+        echo "WARN: No bwrap found, running in native mode, it could be harmful to your computer!" >&2
     fi
 
     if command_uses_runtime_rootfs "$cmd" && command_requires_rootfs_bwrap "$cmd" && [ "$USE_BWRAP" != true ]; then
-        echo "Error: bundled ${cmd} requires bubblewrap to create its runtime filesystem view." >&2
-        echo "Remove --no-sandbox (or unset TRINITY_NO_SANDBOX) before running this command." >&2
-        exit 1
+        echo "WARN: No bwrap found, running in native mode, it could be harmful to your computer!" >&2
     fi
     
     if [ "$USE_BWRAP" = true ] && command -v bwrap &> /dev/null; then
@@ -990,6 +1045,9 @@ run_sandboxed() {
             bwrap $bwrap_args /runtime/bin/$cmd "$@"
         fi
     else
+        if [ "$USE_BWRAP" = true ] && ! command -v bwrap &> /dev/null; then
+            echo "WARN: No bwrap found, running in native mode, it could be harmful to your computer!" >&2
+        fi
         log "Running without sandbox"
         if [ -n "$WORK_DIR" ]; then
             rewrite_workdir_args "$@"

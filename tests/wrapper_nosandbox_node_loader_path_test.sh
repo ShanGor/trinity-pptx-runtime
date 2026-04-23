@@ -20,6 +20,11 @@ echo "${LD_LIBRARY_PATH:-}"
 INNER
 chmod +x "${runtime_dir}/bin/node"
 
+if command -v unshare &> /dev/null && command -v chroot &> /dev/null; then
+    echo "SKIP: unshare/chroot available, cannot test ld-linux fallback for LD_LIBRARY_PATH"
+    exit 0
+fi
+
 output="$(
     TRINITY_NO_SANDBOX=1 \
     TRINITY_OFFICE_RUNTIME="${runtime_dir}" \
