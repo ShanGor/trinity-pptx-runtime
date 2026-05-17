@@ -18,6 +18,98 @@ CLI_BASE_DIR="$PWD"
 INPUT_DIR=""
 WORK_DIR=""
 VERBOSE=false
+TEMP_PATHS_TO_CLEANUP=()
+RUNTIME_SESSION_DIR=""
+RUNTIME_SESSION_STALE_MINUTES="${TRINITY_RUNTIME_SESSION_STALE_MINUTES:-5}"
+
+cleanup_temp_paths() {
+    local path=""
+
+    for path in "${TEMP_PATHS_TO_CLEANUP[@]}"; do
+        [ -n "$path" ] || continue
+        rm -rf "$path" 2>/dev/null || true
+    done
+}
+
+register_temp_path() {
+    local path="$1"
+    TEMP_PATHS_TO_CLEANUP+=("$path")
+}
+
+trap cleanup_temp_paths EXIT
+
+runtime_state_parent() {
+    local base_dir=""
+
+    if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "${XDG_RUNTIME_DIR}" ] && [ -w "${XDG_RUNTIME_DIR}" ]; then
+        base_dir="${XDG_RUNTIME_DIR}"
+    else
+        base_dir="${TMPDIR:-/tmp}"
+    fi
+
+    printf '%s/trinity-office\n' "$base_dir"
+}
+
+prune_stale_runtime_sessions() {
+    local runtime_parent="$1"
+
+    [ -d "$runtime_parent" ] || return 0
+
+    run_host_find "$runtime_parent" \
+        -mindepth 1 \
+        -maxdepth 1 \
+        -type d \
+        -name 'session.*' \
+        -mmin +"$RUNTIME_SESSION_STALE_MINUTES" \
+        -exec rm -rf {} + 2>/dev/null || true
+}
+
+ensure_runtime_session_dir() {
+    local runtime_parent=""
+
+    if [ -n "$RUNTIME_SESSION_DIR" ] && [ -d "$RUNTIME_SESSION_DIR" ]; then
+        printf '%s\n' "$RUNTIME_SESSION_DIR"
+        return 0
+    fi
+
+    runtime_parent="$(runtime_state_parent)"
+    mkdir -p "$runtime_parent"
+    prune_stale_runtime_sessions "$runtime_parent"
+
+    RUNTIME_SESSION_DIR="$(mktemp -d "${runtime_parent}/session.XXXXXX")"
+    register_temp_path "$RUNTIME_SESSION_DIR"
+    printf '%s\n' "$RUNTIME_SESSION_DIR"
+}
+
+runtime_home_host_path() {
+    local runtime_session_dir=""
+
+    runtime_session_dir="$(ensure_runtime_session_dir)"
+    mkdir -p "${runtime_session_dir}/home"
+    printf '%s/home\n' "$runtime_session_dir"
+}
+
+libreoffice_profile_uri() {
+    local runtime_home=""
+    local chroot_bin=""
+
+    if [ "$USE_BWRAP" = true ] && command -v bwrap >/dev/null 2>&1; then
+        printf 'file:///tmp/home/libreoffice-profile\n'
+        return 0
+    fi
+
+    if command_uses_runtime_rootfs soffice; then
+        for chroot_bin in /usr/sbin/chroot /sbin/chroot; do
+            if [ -x "$chroot_bin" ] && command -v unshare >/dev/null 2>&1; then
+                printf 'file:///tmp/home/libreoffice-profile\n'
+                return 0
+            fi
+        done
+    fi
+
+    runtime_home="$(runtime_home_host_path)"
+    printf 'file://%s/libreoffice-profile\n' "$runtime_home"
+}
 
 # Show version
 show_version() {
@@ -711,9 +803,22 @@ generate_pdf_preview() {
     local output_path="$2"
     local visual_output="${WORK_DIR}/${input_name%.pptx}.pdf"
     local visual_status=0
+    local libreoffice_profile_uri=""
+
+    libreoffice_profile_uri="$(libreoffice_profile_uri)"
 
     rm -f "$visual_output"
-    if run_sandboxed soffice --headless --convert-to pdf --outdir /work "/input/$input_name"; then
+    if run_sandboxed soffice \
+        --headless \
+        --invisible \
+        --nodefault \
+        --nofirststartwizard \
+        --nolockcheck \
+        --norestore \
+        "-env:UserInstallation=${libreoffice_profile_uri}" \
+        --convert-to pdf \
+        --outdir /work \
+        "/input/$input_name"; then
         visual_status=0
     else
         visual_status=$?
@@ -739,9 +844,12 @@ setup_env() {
     local library_path=""
     local libreoffice_program_path=""
     local dri_driver_path=""
+    local runtime_home="/tmp/home"
     
     # Set HOME to a writable tmpfs location
-    env_vars="${env_vars} --setenv HOME /tmp/home"
+    env_vars="${env_vars} --setenv HOME ${runtime_home}"
+    env_vars="${env_vars} --setenv XDG_CONFIG_HOME ${runtime_home}/.config"
+    env_vars="${env_vars} --setenv XDG_CACHE_HOME ${runtime_home}/.cache"
 
     # Add runtime bin to PATH for node, python, etc.
     env_vars="${env_vars} --setenv PATH /runtime/bin:/usr/bin:/bin"
@@ -795,8 +903,11 @@ setup_rootfs_env() {
     local tool_cmd="${1:-}"
     local env_vars=""
     local node_path=""
+    local runtime_home="/tmp/home"
 
-    env_vars="${env_vars} --setenv HOME /tmp/home"
+    env_vars="${env_vars} --setenv HOME ${runtime_home}"
+    env_vars="${env_vars} --setenv XDG_CONFIG_HOME ${runtime_home}/.config"
+    env_vars="${env_vars} --setenv XDG_CACHE_HOME ${runtime_home}/.cache"
     env_vars="${env_vars} --setenv PATH /usr/local/bin:/usr/bin:/bin"
     env_vars="${env_vars} --setenv LANG C.UTF-8"
     env_vars="${env_vars} --setenv LC_ALL C.UTF-8"
@@ -933,7 +1044,7 @@ build_bwrap_cmd() {
 run_rootfs_command_without_sandbox() {
     local cmd="$1"
     shift
-    local runtime_home="${TMPDIR:-/tmp}/trinity-office-home"
+    local runtime_home=""
     local rootfs="${RUNTIME_DIR}/rootfs"
     local rootfs_command=""
     local rootfs_loader=""
@@ -947,6 +1058,7 @@ run_rootfs_command_without_sandbox() {
         exit 1
     fi
 
+    runtime_home="$(runtime_home_host_path)"
     mkdir -p "$runtime_home"
     runtime_nodepath="$(discover_rootfs_node_path)"
 
@@ -991,6 +1103,8 @@ run_rootfs_command_without_sandbox() {
         guest_cmd="$(discover_rootfs_command_guest_path "$cmd")"
 
         HOME="/tmp/home" \
+        XDG_CONFIG_HOME="/tmp/home/.config" \
+        XDG_CACHE_HOME="/tmp/home/.cache" \
         LANG="C.UTF-8" \
         LC_ALL="C.UTF-8" \
         PATH="/usr/local/bin:/usr/bin:/bin" \
@@ -1032,7 +1146,7 @@ run_rootfs_command_without_sandbox() {
 run_sandboxed() {
     local cmd="$1"
     shift
-    local runtime_home="${TMPDIR:-/tmp}/trinity-office-home"
+    local runtime_home=""
     local runtime_pythonpath=""
     local runtime_nodepath=""
     local runtime_library_path=""
@@ -1097,6 +1211,7 @@ run_sandboxed() {
             return
         fi
 
+        runtime_home="$(runtime_home_host_path)"
         mkdir -p "$runtime_home"
         runtime_pythonpath="$(discover_pythonpath "$RUNTIME_DIR")"
         runtime_nodepath="$(discover_node_path "$RUNTIME_DIR")"
@@ -1115,6 +1230,8 @@ run_sandboxed() {
                 cd "$WORK_DIR" && \
                 if command_needs_libreoffice_env "$cmd"; then
                     HOME="$runtime_home" \
+                    XDG_CONFIG_HOME="$runtime_home/.config" \
+                    XDG_CACHE_HOME="$runtime_home/.cache" \
                     LANG="C.UTF-8" \
                     LC_ALL="C.UTF-8" \
                     PATH="$RUNTIME_DIR/bin:/usr/bin:/bin" \
@@ -1128,6 +1245,8 @@ run_sandboxed() {
                     "$RUNTIME_DIR/bin/$cmd" "${rewritten_args[@]}"
                 else
                     HOME="$runtime_home" \
+                    XDG_CONFIG_HOME="$runtime_home/.config" \
+                    XDG_CACHE_HOME="$runtime_home/.cache" \
                     LANG="C.UTF-8" \
                     LC_ALL="C.UTF-8" \
                     PATH="$RUNTIME_DIR/bin:/usr/bin:/bin" \
@@ -1140,6 +1259,8 @@ run_sandboxed() {
         else
             if command_needs_libreoffice_env "$cmd"; then
                 HOME="$runtime_home" \
+                XDG_CONFIG_HOME="$runtime_home/.config" \
+                XDG_CACHE_HOME="$runtime_home/.cache" \
                 LANG="C.UTF-8" \
                 LC_ALL="C.UTF-8" \
                 PATH="$RUNTIME_DIR/bin:/usr/bin:/bin" \
@@ -1153,6 +1274,8 @@ run_sandboxed() {
                 "$RUNTIME_DIR/bin/$cmd" "${rewritten_args[@]}"
             else
                 HOME="$runtime_home" \
+                XDG_CONFIG_HOME="$runtime_home/.config" \
+                XDG_CACHE_HOME="$runtime_home/.cache" \
                 LANG="C.UTF-8" \
                 LC_ALL="C.UTF-8" \
                 PATH="$RUNTIME_DIR/bin:/usr/bin:/bin" \
@@ -1277,6 +1400,8 @@ main() {
     if [ "${TRINITY_NO_SANDBOX:-}" = "1" ]; then
         USE_BWRAP=false
     fi
+
+    ensure_runtime_session_dir >/dev/null
     
     # Parse global options
     while [[ $# -gt 0 ]]; do

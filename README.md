@@ -179,6 +179,14 @@ sudo ./build.sh
 # Output: trinity-office-runtime-linux-x64.tar.gz
 ```
 
+To prepare a bundle based on Ubuntu 26.04 instead of the default Ubuntu 24.04
+rootfs, override the base release when running the same build script:
+
+```bash
+cd runtime
+sudo UBUNTU_VERSION=26.04 UBUNTU_CODENAME=resolute ./build.sh
+```
+
 Build downloads are cached locally by default under `${XDG_CACHE_HOME:-$HOME/.cache}/trinity-office-runtime`.
 Override that location with `TRINITY_BUILD_CACHE_DIR=/path/to/cache` when you want a shared or persistent cache across worktrees.
 
